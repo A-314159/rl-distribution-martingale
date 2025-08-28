@@ -38,12 +38,14 @@ Can you write a short user guide about how to use github:
 
 ------------------------------------------------------------
 My todo list:
-a) Do the edits to the code (some remaining to do)
-b) Test in full once the chart is available to check if the distribution converges. Try GNLM, LBFGS. Try float32, with graph exec. Debug on hint distribution for now.
-b-bis) Once working, launch a long training
-c) Try the agent
-d) Try the cloud computing
-e) Build a word document to summarize what I did to create the repo, commit, push, how to use github, use the agent, use cloud computing via github
+a) Do the edits to the code (some remaining to do) but later.
+b) Test the new version of the optmizer class and check types in lbfgs and gnlm
+c) Test in full once the chart is available to check if the distribution converges. Try GNLM, LBFGS. Try float32, with graph exec. Debug on hint distribution for now.
+d) Once working, launch a long training
+e) Try the agent mode of chat gpt (later)
+f) Try the cloud computing
+g) Build a word document to summarize what I did to create the repo, commit, push, how to use github, use the agent, use cloud computing via github
+h) Continue reviewing my paper
 
 ------------------------------------------------------------
 Request to chat gpt about the paper: (not done yet)
