@@ -23,7 +23,6 @@ from itertools import product
 @dataclass
 class TrainConfig:
     optimizer: str = "adam"  # adam|sgd|rmsprop|gn|lm
-    lr: float = 1e-3
     batch_size: int = 2 ** 16
     full_batch: bool = False
     max_epochs: int = 100000
@@ -36,10 +35,16 @@ class TrainConfig:
     chart_pdf: str = "distribution.pdf"
     eval_pairs: list = None
     mc_paths: int = 20000
-    # GN/LM extras
+    # gauss newton levenberg marquardt
     gn_iters: int = 5
     gn_damping: float = 1e-2
     gn_verbose: bool = False
+    # limited memory BFGS
+    lbfgs_iters: int = 50
+    lbfgs_tol: float = 1e-6
+    lbfgs_verbose: bool = False
+    # other optimizers by gradient descent
+    lr: float = 1e-3
 
 
 def _anneal_lambda(ep, cfg: TrainConfig):
@@ -83,13 +88,11 @@ class DistributionTrainer:
 
         return self.model
 
-    def residuals_fn(self, data, full_batch=False, detailed=False):
-        data = data
+    def residuals_fn(self, data, detailed=False):
         universe = self.universe
-        full_batch = full_batch
 
         @tf_compile
-        def residuals(lam, idx_batch: tf.Tensor) -> tf.Tensor:
+        def residuals(lam, idx_batch: tf.Tensor = None) -> tf.Tensor:
             r, _, _ = details(lam, idx_batch)
             return r
 
@@ -99,7 +102,7 @@ class DistributionTrainer:
                     'x_kids', 'w_kids', 'terminal', 'dS', 'pv_kids', 'Y_hint']
             values = []
             for k in keys:
-                val = data[k] if full_batch else tf.gather(data[k], idx_batch)
+                val = data[k] if idx_batch is None else tf.gather(data[k], idx_batch)
                 values.append(val)
             return tuple(values)
 
@@ -152,7 +155,7 @@ class DistributionTrainer:
         csv_path = out_dir / self.cfg.log_csv
         to_csv(csv_path, "w", ["epoch", "elapsed_sec", "rmse_loss", "lambda_hint"])
 
-        opt = Optimizer(self.cfg, self.model, self.residuals_fn(self.data, self.cfg.full_batch))
+        opt = Optimizer(self.cfg, self.model, self.residuals_fn(self.data))
         t0 = time.time()
         N = int(self.data["t"].shape[0])
         hot = HotKeys()
