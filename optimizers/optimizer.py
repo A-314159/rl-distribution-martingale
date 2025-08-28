@@ -7,7 +7,7 @@ from utilities.tensorflow_config import tf_compile
 class Optimizer:
     def __init__(self, cfg, model, residuals_fn_builder):
         name = cfg.optimizer.lower()
-        run = self.gd
+        run = self.gd  # gd as in gradient descent
         if name == "adam":
             opt = keras.optimizers.Adam(cfg.lr)
         elif name == "sgd":
@@ -16,7 +16,7 @@ class Optimizer:
             opt = keras.optimizers.RMSprop(cfg.lr)
         elif name in ("gn", "lm"):
             opt = GaussNewtonLM(damping=cfg.gn_damping, max_iters=cfg.gn_iters, verbose=cfg.gn_verbose)
-            run = self.gn
+            run = self.gn  # gn as in Gauss-Newton
         else:
             raise Exception('Optimizer %s is not implemented' % name)
         self.model = model
