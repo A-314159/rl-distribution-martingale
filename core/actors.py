@@ -9,11 +9,14 @@ import abc
 
 
 class Actor(abc.ABC):
-    def __call__(self, *arg, universe: UniverseBS) -> tf.Tensor:
-        raise NotImplementedError
+    def __call__(self, *arg, universe: UniverseBS) -> tf.Tensor: ...
 
     @abc.abstractmethod
     def get_config(self) -> dict: ...
+
+    @abc.abstractmethod
+    def cast(self) -> dict: ...
+
 
 @tf_compile
 class BSDeltaHedge(Actor, ABC):
@@ -27,3 +30,6 @@ class BSDeltaHedge(Actor, ABC):
 
     def get_config(self) -> dict:
         return {"name": "BSDeltaHedge"}
+
+    @tf_compile
+    def cast(self): ...

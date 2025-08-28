@@ -15,7 +15,7 @@ def main():
     s = SamplerConfig(N=2 ** 14, x0=0.0, a=0.3, b=4.0, c=1 / 52, r0=0.02, r1=0.002)
     c = TrainConfig(optimizer="adam", lr=1e-3,
                     batch_size=512, max_epochs=10000, max_time_sec=3600, loss_tol_sqrt=1e-4,
-                    model_dir=folder, eval_pairs=[(0, 0.0), (20, 0.0), (40, 0.0)],
+                    model_dir='experiment/'+folder, eval_pairs=[(0, 0.0), (20, 0.0), (40, 0.0)],
                     mc_paths=10000)
     a = BSDeltaHedge()
     trainer = DistributionTrainer(u, s, c, a)

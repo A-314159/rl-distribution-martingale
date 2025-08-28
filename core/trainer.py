@@ -29,9 +29,9 @@ class TrainConfig:
     loss_tol_sqrt: float = 1e-4
     hidden: tuple = (32, 32)
     activation: str = "tanh"
-    model_dir: str = "saved_F_model_pkg"
+    model_dir: str = "no name"
     log_csv: str = "training_log.csv"
-    chart_pdf: str = "comparison.pdf"
+    chart_pdf: str = "distribution.pdf"
     eval_pairs: list = None
     mc_paths: int = 20000
     # GN/LM extras
@@ -196,7 +196,7 @@ class DistributionTrainer:
                     grads = tape.gradient(loss, self.model.trainable_variables)
                     opt.apply_gradients(zip(grads, self.model.trainable_variables))
                     losses.append(float(loss.numpy()))
-            self.chart(lam, np.array([0, self.universe.T - self.universe.h]))
+
             if hot.show_chart:
                 self.chart(lam, np.array([0, self.universe.T - self.universe.h]))
                 hot.show_chart = False
@@ -223,11 +223,11 @@ class DistributionTrainer:
 
         tp = tf.keras.backend.floatx()
         _t, _x, _y = np.meshgrid(t, x, y, indexing='ij')
-        _t = tf.cast(tf.convert_to_tensor(_t.flatten()[:, None]), tp)
-        _x = tf.cast(tf.convert_to_tensor(_x.flatten()[:, None]), tp)
-        _y = tf.cast(tf.convert_to_tensor(_y.flatten()[:, None]), tp)
+        _t = tf.cast(tf.convert_to_tensor(_t.flatten()), tp)
+        _x = tf.cast(tf.convert_to_tensor(_x.flatten()), tp)
+        _y = tf.cast(tf.convert_to_tensor(_y.flatten()), tp)
 
-        mums = family(self.sampler_cfg, self.universe, kwargs={'t': _t, 'x': _x, 'y': _y})
+        mums = family(self.sampler_cfg, self.universe, txy={'t': _t, 'x': _x, 'y': _y})
         families = expand_family(mums, self.universe)
         res_fn = self.residuals_fn(families, lam, detailed=True, all_samples=True)
         e, F, Y = res_fn()
@@ -255,7 +255,7 @@ class DistributionTrainer:
                     line, = ax[r, c].plot(y, data[r, c], label='x=%.1f' % (x[j]), linewidth=lw[i], linestyle=ls[i])
                     col[r, c] = line.get_color()
                 else:
-                    x[r, c].plot(y, data[r, c], color=col[r, c], linewidth=lw[i], linestyle=ls[i])
+                    ax[r, c].plot(y, data[r, c], color=col[r, c], linewidth=lw[i], linestyle=ls[i])
                 ax[r, c].plot(mu_x, rg[r, c], color=col[r, c], linestyle='--', linewidth=lw[i])
 
         titles = np.array([

@@ -18,7 +18,7 @@ class SamplerConfig:
 
 
 @tf_compile
-def family(cfg: SamplerConfig, u, **kwargs) -> dict:
+def family(cfg: SamplerConfig, u, txy=None) -> dict:
     """
     return a dictionary with random parent samples if kwargs is not used
     :param cfg:
@@ -29,15 +29,21 @@ def family(cfg: SamplerConfig, u, **kwargs) -> dict:
     N = cfg.N
     rng = tf.random
     tp = tf.keras.backend.floatx()
-    # todo: put the casting in the universe and configuration init instead
-    (T, h, K, sigma, x0, a, b, c, r0, r1) = (
-        cast_all(u.T, u.h, u.K, u.sigma, cfg.x0, cfg.a, cfg.b, cfg.c, cfg.r0, cfg.r1, dtype=tp))
+    # todo: put the casting in the configuration init instead
+    h, T, sigma, K = u.h, u.T, u.sigma, u.K
+    (x0, a, b, c, r0, r1) = cast_all(cfg.x0, cfg.a, cfg.b, cfg.c, cfg.r0, cfg.r1, dtype=tp)
+
+    usable_dict = isinstance(txy, dict)
+    if usable_dict:
+        usable_dict = isinstance(txy, dict) and 't' in txy and 'x' in txy and 'y' in txy
+        if not usable_dict:
+            raise Exception("txy is not a dictionary in family or does not include all the keys 't', 'x', 'y'")
 
     # -----------------------------
     # draw time
     # -----------------------------
-    if 't' in kwargs:
-        t = kwargs['t']
+    if usable_dict:
+        t = txy['t']
         k = tf.cast(t, tf.int32)
     else:
         k = rng.uniform(shape=(N,), minval=0, maxval=u.P, dtype=tf.int32)
@@ -60,8 +66,8 @@ def family(cfg: SamplerConfig, u, **kwargs) -> dict:
     x_hi_s = tf.minimum(x0 + a + dlin, x_hi)
     x_lo_s = tf.maximum(x0 - a - dlin, x_lo)
 
-    if 'x' in kwargs:
-        x = kwargs['x']
+    if usable_dict:
+        x = txy['x']
     else:
         u = rng.uniform(shape=(N,), minval=0., maxval=1., dtype=tp)
         x = x_lo_s + u * (x_hi_s - x_lo_s)
@@ -74,8 +80,8 @@ def family(cfg: SamplerConfig, u, **kwargs) -> dict:
     y_hi = y_mu + y_half
     y_lo = y_mu - y_half
 
-    if 'y' in kwargs:
-        y = kwargs['y']
+    if usable_dict:
+        y = txy['y']
     else:
         u = rng.uniform(shape=(N,), minval=0., maxval=1., dtype=tp)
         y = y_lo + u * (y_hi - y_lo)

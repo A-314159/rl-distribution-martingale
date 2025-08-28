@@ -20,13 +20,19 @@ class Universe(abc.ABC):
     @abc.abstractmethod
     def get_config(self) -> dict: ...
 
+    @abc.abstractmethod
+    def cast(self) -> dict: ...
+
 
 class UniverseBS(Universe, ABC):
     def __init__(self, sigma: float = 0.3, T: float = 1, K: float = 1, P: int = 60, **kwargs):
         self.sigma, self.T, self.K, self.P = sigma, T, K, P
         if kwargs is not None: set_attributes(self, kwargs)
         self.h: float = self.T / self.P
+        self.cast()
 
+    @tf_compile
+    def cast(self):
         tp = tf.keras.backend.floatx()
         self.sigma, self.T, self.h, self.K = cast_all(self.sigma, self.T, self.h, self.K, dtype=tp)
 
@@ -39,5 +45,5 @@ class UniverseBS(Universe, ABC):
         return x_children, probs
 
     def get_config(self) -> dict:
-        return {"name": "UniverseBS", "sigma": float(self.sigma), "T": float(self.T), "P": int(self.P), "K": float(self.K)}
-
+        return {"name": "UniverseBS", "sigma": float(self.sigma), "T": float(self.T), "P": int(self.P),
+                "K": float(self.K)}
