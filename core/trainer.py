@@ -14,7 +14,7 @@ from core.universe import UniverseBS
 from optimizers.gnlm import GaussNewtonLM
 
 from utilities.tensorflow_config import tf_compile
-from utilities.misc import HotKeys, to_csv
+from utilities.misc import HotKeys, to_csv, jsonable
 import matplotlib.pyplot as plt
 from itertools import product
 
@@ -83,13 +83,10 @@ class DistributionTrainer:
         out_dir = Path(self.cfg.model_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # please suggest a solution for the bug below
-        bugged=True
-        if not bugged:
-            with open(out_dir / "hyperparams.json", "w") as f:
-                json.dump(
-                    {"universe": self.universe.__dict__, "sampler": asdict(self.sampler_cfg), "train": asdict(self.cfg)}, f,
-                    indent=2)
+        with open(out_dir / "hyperparams.json", "w") as f:
+            json.dump({"universe": jsonable(self.universe), "actor": jsonable(self.actor),
+                       "sampler": asdict(self.sampler_cfg), "train": asdict(self.cfg)}, f, indent=2)
+
         return self.model
 
     def residuals_fn(self, data, lam, all_samples=False, detailed=False):
@@ -108,17 +105,18 @@ class DistributionTrainer:
                     'x_kids', 'w_kids', 'terminal', 'dS', 'pv_kids', 'Y_hint']
             values = []
             for k in keys:
-                val=data[k] if all_samples else tf.gather(data[k], idx_batch)
+                val = data[k] if all_samples else tf.gather(data[k], idx_batch)
                 values.append(val)
             return tuple(values)
 
         @tf_compile
-        def details(idx_batch: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-
+        def details(idx_batch: tf.Tensor = None) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
             t, sqrt_tau, x, x_lo, x_hi, y, y_lo, y_hi, t_c, sqrt_tau_c, x_c, w_c, terminal, dS, pv_c, Y_hint = (
                 gather(idx_batch))
-            t_c = tf.concat([t_c, t_c], axis=1)
-            sqrt_tau_c = tf.concat([sqrt_tau_c, sqrt_tau_c], axis=1)
+
+            nb_kids = tf.shape(x_c)[1]
+            t_c = tf.repeat(t_c, repeats=nb_kids, axis=1)
+            sqrt_tau_c = tf.repeat(sqrt_tau_c, repeats=nb_kids, axis=1)
 
             q = self.actor(t, sqrt_tau, universe=universe)
             l_prime = -q[:, None] * dS - tf.where(terminal, pv_c, 0)
@@ -198,6 +196,7 @@ class DistributionTrainer:
                     grads = tape.gradient(loss, self.model.trainable_variables)
                     opt.apply_gradients(zip(grads, self.model.trainable_variables))
                     losses.append(float(loss.numpy()))
+            self.chart(lam, np.array([0, self.universe.T - self.universe.h]))
             if hot.show_chart:
                 self.chart(lam, np.array([0, self.universe.T - self.universe.h]))
                 hot.show_chart = False
@@ -228,7 +227,7 @@ class DistributionTrainer:
         _x = tf.cast(tf.convert_to_tensor(_x.flatten()[:, None]), tp)
         _y = tf.cast(tf.convert_to_tensor(_y.flatten()[:, None]), tp)
 
-        mums = family(kwargs={'t': _t, 'x': _x, 'y': _y})
+        mums = family(self.sampler_cfg, self.universe, kwargs={'t': _t, 'x': _x, 'y': _y})
         families = expand_family(mums, self.universe)
         res_fn = self.residuals_fn(families, lam, detailed=True, all_samples=True)
         e, F, Y = res_fn()

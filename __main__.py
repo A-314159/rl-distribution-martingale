@@ -6,7 +6,7 @@ if __name__ == "__main__":
 
     print("----------------------------------------------------------------------------")
     print("Training will begin.")
-    print("In python console, enter: q to save and quit training, c to show distribution chart")
+    print("In the run console, enter: q to save and quit training, c to show distribution chart")
     print("----------------------------------------------------------------------------")
 
     # note: The import below must be done after call to configure()

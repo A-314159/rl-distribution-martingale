@@ -1,7 +1,9 @@
+from abc import ABC
 from dataclasses import dataclass
 import tensorflow as tf
 from utilities.tensorflow_config import tf_compile
 from utilities.misc import set_attributes, cast_all
+import abc
 
 
 # ---------------------------------------------
@@ -11,12 +13,15 @@ from utilities.misc import set_attributes, cast_all
 # c) a model of evolution of the universe
 # ---------------------------------------------
 
-class Universe:
+class Universe(abc.ABC):
     def children(self, *args) -> tf.Tensor:
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def get_config(self) -> dict: ...
 
-class UniverseBS(Universe):
+
+class UniverseBS(Universe, ABC):
     def __init__(self, sigma: float = 0.3, T: float = 1, K: float = 1, P: int = 60, **kwargs):
         self.sigma, self.T, self.K, self.P = sigma, T, K, P
         if kwargs is not None: set_attributes(self, kwargs)
@@ -32,3 +37,7 @@ class UniverseBS(Universe):
         x_children = tf.stack([x_mu + d, x_mu - d], axis=1)
         probs = tf.ones_like(x_children) * 0.5
         return x_children, probs
+
+    def get_config(self) -> dict:
+        return {"name": "UniverseBS", "sigma": float(self.sigma), "T": float(self.T), "P": int(self.P), "K": float(self.K)}
+

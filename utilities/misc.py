@@ -1,7 +1,7 @@
 from tensorflow.keras import mixed_precision
 import tensorflow as tf
 from utilities.tensorflow_config import tf_compile
-import sys, threading, csv
+import sys, threading, csv, json
 
 # ---------------------------------------
 # Normal cdf
@@ -31,6 +31,17 @@ def set_attributes(object, param_dictionary):
     for k, v in param_dictionary.items():
         if not hasattr(object, k): raise Exception('Unknown attribute: %s', k)
         setattr(object, k, v)
+
+
+def jsonable(obj):
+    if hasattr(obj, "get_config"): return obj.get_config()
+    if isinstance(obj, (list, tuple)): return [jsonable(x) for x in obj]
+    if isinstance(obj, dict): return {k: jsonable(v) for k, v in obj.items()}
+    try:
+        _ = json.dumps(obj);
+        return obj
+    except Exception:
+        return str(obj)
 
 
 # ---------------------------------------

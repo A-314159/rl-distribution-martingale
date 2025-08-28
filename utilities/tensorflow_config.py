@@ -135,6 +135,71 @@ def configure(*,
     if show_diagnostic:
         diagnostic()
 
+    print_tf_summary(seed)
+
+
+def print_tf_summary(seed_used: int = -1):
+    import os, sys, tensorflow as tf
+    # precision policy
+    try:
+        from tensorflow.keras import mixed_precision
+        pol = mixed_precision.global_policy()
+        policy_str = f"{pol.name} (compute={pol.compute_dtype}, var={pol.variable_dtype})"
+    except Exception:
+        policy_str = tf.keras.backend.floatx()
+
+    # versions
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    tf_ver = tf.__version__
+
+    # devices
+    gpus = tf.config.list_physical_devices("GPU")
+    gpu_names = []
+    for g in gpus:
+        try:
+            det = tf.config.experimental.get_device_details(g)
+            gpu_names.append(det.get("device_name", g.name))
+        except Exception:
+            gpu_names.append(getattr(g, "name", "GPU"))
+    gpu_growth = []
+    for g in gpus:
+        try:
+            gpu_growth.append(str(tf.config.experimental.get_memory_growth(g)))
+        except Exception:
+            gpu_growth.append("?")
+    gpu_info = f"{len(gpus)} [{' | '.join(gpu_names)}] mem_growth=[{', '.join(gpu_growth)}]" if gpus else "0"
+
+    # XLA / eager / execution “mode”
+    try:
+        xla_jit = bool(tf.config.optimizer.get_jit())
+    except Exception:
+        xla_jit = False
+    eager = tf.executing_eagerly()
+    # Note: XLA JIT applies to tf.function graphs; this is a coarse label:
+    if eager and not xla_jit:
+        exec_mode = "eager"
+    elif xla_jit:
+        exec_mode = "graph+xla"
+    else:
+        exec_mode = "graph"
+
+    # oneDNN & determinism toggles
+    one_dnn = os.environ.get("TF_ENABLE_ONEDNN_OPTS", "1")
+    det_ops = os.environ.get("TF_DETERMINISTIC_OPS", os.environ.get("TF_CUDNN_DETERMINISTIC", "0"))
+    tf32_ovr = os.environ.get("NVIDIA_TF32_OVERRIDE", "")
+    run_eager_opt = getattr(tf.config, "functions_run_eagerly", None) or getattr(tf.config, "run_functions_eagerly",
+                                                                                 None)
+    run_eager_flag = run_eager_opt() if callable(run_eager_opt) else eager
+
+    seed_used_str = f"{seed_used}" if seed_used != 1 else "None"
+
+    print(
+        f"[TF] py={py_ver} tf={tf_ver} | policy={policy_str} | "
+        f"GPUs={gpu_info} | oneDNN={one_dnn} | exec={exec_mode} "
+        f"(eager_flag={run_eager_flag}) | XLA={xla_jit} | "
+        f"det_ops={det_ops} | TF32_OVR={tf32_ovr or 'unset'} | seed={seed_used_str}"
+    )
+
 
 def set_tf_mode(mode: str):
     import tensorflow as tf
@@ -142,7 +207,14 @@ def set_tf_mode(mode: str):
     if mode not in {"eager", "graph", "graph_xla"}:
         raise ValueError("mode must be 'eager', 'graph', or 'graph_xla'")
     _MODE = mode
-    tf.config.run_functions_eagerly(mode == "eager")
+    if mode == 'eager':
+        tf.config.run_functions_eagerly(True)
+        try:
+            tf.data.experimental.enable_debug_mode()
+        except Exception:
+            pass
+    else:
+        tf.config.run_functions_eagerly(True)
 
 
 def tf_compile(fn=None, *, reduce_retracing=None, jit=None):
@@ -279,5 +351,3 @@ def make_dataset(data, labels=None, batch_size=32, shuffle=True, cache=False, pr
     ds = ds.with_options(options)
 
     return ds
-
-
