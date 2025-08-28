@@ -5,9 +5,10 @@ from utilities.tensorflow_config import tf_compile
 
 
 class Optimizer:
-    def __init__(self, cfg, model, residuals_fn_builder):
+    def __init__(self, cfg, model, error_function):
         name = cfg.optimizer.lower()
         run = self.gd  # gd as in gradient descent
+        self.require_full_batch = False
         if name == "adam":
             opt = keras.optimizers.Adam(cfg.lr)
         elif name == "sgd":
@@ -17,35 +18,41 @@ class Optimizer:
         elif name in ("gn", "lm"):
             opt = GaussNewtonLM(damping=cfg.gn_damping, max_iters=cfg.gn_iters, verbose=cfg.gn_verbose)
             run = self.gn  # gn as in Gauss-Newton
+        elif name == 'lbfgs':
+            self.require_full_batch = True
+            # todo: plug tfp's optimizer later
+            opt = None
+            run = None
         else:
             raise Exception('Optimizer %s is not implemented' % name)
         self.model = model
         self.opt = opt
-        self.function_builder = residuals_fn_builder
+        self.error_function = error_function
         self.run = run
 
     @tf_compile
-    def _loss(self, idx_batch, lam):
-        r = self.function_builder(lam)(idx_batch)
+    def _loss(self, lam, idx_batch):
+        r = self.error_function(lam, idx_batch)
         return 0.5 * tf.reduce_mean(tf.square(r))
 
     @tf_compile
-    def gd(self, idx_batch, lam):
+    def gd(self, lam, idx_batch):
         with tf.GradientTape() as tape:
-            loss = self._loss(idx_batch, lam)
+            loss = self._loss(lam, idx_batch)
         grads = tape.gradient(loss, self.model.trainable_variables)
         self.opt.apply_gradients(zip(grads, self.model.trainable_variables))
         return float(loss.numpy())
 
     @tf_compile
-    def gn(self, idx_batch, lam):
-        rfn = self.function_builder(lam)
+    def gn(self, lam, idx_batch):
+        def error_closure():
+            return self.error_function(lam, idx_batch)
         try:
-            self.gn.minimize(rfn, self.model.trainable_variables)
+            self.opt.minimize(error_closure, self.model.trainable_variables)
         except AttributeError:
-            if hasattr(self.gn, "step"):
-                self.gn.run(rfn, self.model.trainable_variables)
+            if hasattr(self.gn, "run"):
+                self.opt.run(error_closure, self.model.trainable_variables)
             else:
                 raise
-        r = rfn(idx_batch)
+        r = error_closure()
         return float(0.5 * tf.reduce_mean(tf.square(r)).numpy())

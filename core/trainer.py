@@ -83,10 +83,10 @@ class DistributionTrainer:
 
         return self.model
 
-    def residuals_fn(self, data, all_samples=False, detailed=False):
+    def residuals_fn(self, data, full_batch=False, detailed=False):
         data = data
         universe = self.universe
-        all_samples = all_samples
+        full_batch = full_batch
 
         @tf_compile
         def residuals(lam, idx_batch: tf.Tensor) -> tf.Tensor:
@@ -99,7 +99,7 @@ class DistributionTrainer:
                     'x_kids', 'w_kids', 'terminal', 'dS', 'pv_kids', 'Y_hint']
             values = []
             for k in keys:
-                val = data[k] if all_samples else tf.gather(data[k], idx_batch)
+                val = data[k] if full_batch else tf.gather(data[k], idx_batch)
                 values.append(val)
             return tuple(values)
 
@@ -152,24 +152,22 @@ class DistributionTrainer:
         csv_path = out_dir / self.cfg.log_csv
         to_csv(csv_path, "w", ["epoch", "elapsed_sec", "rmse_loss", "lambda_hint"])
 
-        opt = Optimizer(self.cfg, self.model, self.residuals_fn(self.data))
+        opt = Optimizer(self.cfg, self.model, self.residuals_fn(self.data, self.cfg.full_batch))
         t0 = time.time()
         N = int(self.data["t"].shape[0])
-        bsz = self.cfg.batch_size
         hot = HotKeys()
         epoch = 0
         while epoch < self.cfg.max_epochs:
 
             lam = tf.cast(_anneal_lambda(epoch, self.cfg), tf.keras.backend.floatx())
-            perm = tf.random.shuffle(tf.range(N))
             losses = []
-
-            if self.cfg.full_batch:
-                batches = [tf.range(N)]
+            if self.cfg.full_batch or opt.require_full_batch:
+                losses.append(opt.run(lam))
             else:
-                batches = [perm[i:min(i + bsz, N)] for i in range(0, N, bsz)]
-            for idx in batches:
-                losses.append(opt.run(lam, idx))
+                perm = tf.random.shuffle(tf.range(N))
+                for start in range(0, N, self.cfg.batch_size):
+                    idx = perm[start:min(start + self.cfg.batch_size, N)]
+                    losses.append(opt.run(lam, idx))
 
             if hot.show_chart:
                 self.chart(lam, np.array([0, self.universe.T - self.universe.h]))
@@ -203,7 +201,7 @@ class DistributionTrainer:
 
         mums = family(self.sampler_cfg, self.universe, txy={'t': _t, 'x': _x, 'y': _y})
         families = expand_family(mums, self.universe)
-        res_fn = self.residuals_fn(families, lam, detailed=True, all_samples=True)
+        res_fn = self.residuals_fn(families, lam, detailed=True, full_batch=True)
         e, F, Y = res_fn()
         e = e.numpy().reshape(t.size, x.size, y.size)
         F = F.numpy().reshape(t.size, x.size, y.size)
