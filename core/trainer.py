@@ -12,6 +12,7 @@ from core.actors import Actor
 from core.universe import UniverseBS
 
 from optimizers.gnlm import GaussNewtonLM
+from optimizers.optimizer import Optimizer
 
 from utilities.tensorflow_config import tf_compile
 from utilities.misc import HotKeys, to_csv, jsonable
@@ -40,17 +41,9 @@ class TrainConfig:
     gn_verbose: bool = False
 
 
-def _make_tf_optimizer(name, lr):
-    name = name.lower()
-    if name == "adam": return keras.optimizers.Adam(lr)
-    if name == "sgd": return keras.optimizers.SGD(lr, momentum=0.9, nesterov=True)
-    if name == "rmsprop": return keras.optimizers.RMSprop(lr)
-    raise ValueError(f"Unknown TF optimizer {name}")
-
-
 def _anneal_lambda(ep, cfg: TrainConfig):
     # Use same defaults as before: start at 1.0 and linearly go to 0.0 in 10 epochs unless changed outside.
-    final = 0.0
+    final = 1.0
     init = 1.0
     span = 10
     if hasattr(cfg, "lambda_hint_final"): final = cfg.lambda_hint_final
@@ -89,14 +82,14 @@ class DistributionTrainer:
 
         return self.model
 
-    def residuals_fn(self, data, lam, all_samples=False, detailed=False):
+    def residuals_fn(self, data, all_samples=False, detailed=False):
         data = data
         universe = self.universe
         all_samples = all_samples
 
         @tf_compile
-        def residuals(idx_batch: tf.Tensor) -> tf.Tensor:
-            r, _, _ = details(idx_batch)
+        def residuals(lam, idx_batch: tf.Tensor) -> tf.Tensor:
+            r, _, _ = details(lam, idx_batch)
             return r
 
         @tf_compile
@@ -110,7 +103,7 @@ class DistributionTrainer:
             return tuple(values)
 
         @tf_compile
-        def details(idx_batch: tf.Tensor = None) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+        def details(lam, idx_batch: tf.Tensor = None) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
             t, sqrt_tau, x, x_lo, x_hi, y, y_lo, y_hi, t_c, sqrt_tau_c, x_c, w_c, terminal, dS, pv_c, Y_hint = (
                 gather(idx_batch))
 
@@ -158,12 +151,7 @@ class DistributionTrainer:
         csv_path = out_dir / self.cfg.log_csv
         to_csv(csv_path, "w", ["epoch", "elapsed_sec", "rmse_loss", "lambda_hint"])
 
-        use_gn = self.cfg.optimizer.lower() in ("gn", "lm")
-        if use_gn:
-            opt = GaussNewtonLM(damping=self.cfg.gn_damping, max_iters=self.cfg.gn_iters, verbose=self.cfg.gn_verbose)
-        else:
-            opt = _make_tf_optimizer(self.cfg.optimizer, self.cfg.lr)
-
+        opt = Optimizer(self.cfg, self.model, self.residuals_fn(self.data))
         t0 = time.time()
         N = int(self.data["t"].shape[0])
         bsz = self.cfg.batch_size
@@ -177,25 +165,7 @@ class DistributionTrainer:
 
             for start in range(0, N, bsz):
                 idx = perm[start: min(start + bsz, N)]
-                if use_gn:
-                    res_fn = self.residuals_fn(self.data, lam)
-                    try:
-                        opt.minimize(res_fn, self.model.trainable_variables)
-                    except AttributeError:
-                        if hasattr(opt, "step"):
-                            opt.step(res_fn, self.model.trainable_variables)
-                        else:
-                            raise
-                    r = res_fn(idx)
-                    losses.append(float(0.5 * tf.reduce_mean(tf.square(r)).numpy()))
-                else:
-                    with tf.GradientTape() as tape:
-                        res_fn = self.residuals_fn(self.data, lam)
-                        r = res_fn(idx)
-                        loss = 0.5 * tf.reduce_mean(tf.square(r))
-                    grads = tape.gradient(loss, self.model.trainable_variables)
-                    opt.apply_gradients(zip(grads, self.model.trainable_variables))
-                    losses.append(float(loss.numpy()))
+                opt.run(idx, lam)
 
             if hot.show_chart:
                 self.chart(lam, np.array([0, self.universe.T - self.universe.h]))
