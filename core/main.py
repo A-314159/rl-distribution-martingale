@@ -16,7 +16,7 @@ def main():
     c = TrainConfig(optimizer="adam", lr=1e-3,
                     batch_size=512, max_epochs=10000, max_time_sec=3600, loss_tol_sqrt=1e-4,
                     model_dir='experiment/'+folder, eval_pairs=[(0, 0.0), (20, 0.0), (40, 0.0)],
-                    mc_paths=10000)
+                    mc_paths=10000, full_batch=True)
     a = BSDeltaHedge()
     trainer = DistributionTrainer(u, s, c, a)
     trainer.build()

@@ -25,6 +25,7 @@ class TrainConfig:
     optimizer: str = "adam"  # adam|sgd|rmsprop|gn|lm
     lr: float = 1e-3
     batch_size: int = 2 ** 16
+    full_batch: bool = False
     max_epochs: int = 100000
     max_time_sec: int = 7200
     loss_tol_sqrt: float = 1e-4
@@ -163,9 +164,12 @@ class DistributionTrainer:
             perm = tf.random.shuffle(tf.range(N))
             losses = []
 
-            for start in range(0, N, bsz):
-                idx = perm[start: min(start + bsz, N)]
-                opt.run(idx, lam)
+            if self.cfg.full_batch:
+                batches = [tf.range(N)]
+            else:
+                batches = [perm[i:min(i + bsz, N)] for i in range(0, N, bsz)]
+            for idx in batches:
+                losses.append(opt.run(lam, idx))
 
             if hot.show_chart:
                 self.chart(lam, np.array([0, self.universe.T - self.universe.h]))
