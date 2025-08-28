@@ -1,0 +1,53 @@
+{
+  "universe": {
+    "sigma": 0.3,
+    "T": 0.5,
+    "P": 60,
+    "K": 1.0
+  },
+  "sampler": {
+    "N": 16384,
+    "x0": 0.0,
+    "a": 0.3,
+    "b": 4.0,
+    "c": 0.019230769230769232,
+    "r0": 0.02,
+    "r1": 0.002
+  },
+  "train": {
+    "optimizer": "adam",
+    "lr": 0.001,
+    "batch_size": 512,
+    "max_epochs": 10000,
+    "max_time_sec": 3600,
+    "loss_tol_sqrt": 0.0001,
+    "hidden": [
+      32,
+      32
+    ],
+    "activation": "tanh",
+    "model_dir": "saved_F_model_pkg",
+    "log_csv": "training_log.csv",
+    "chart_pdf": "comparison.pdf",
+    "eval_pairs": [
+      [
+        0,
+        0.0
+      ],
+      [
+        20,
+        0.0
+      ],
+      [
+        40,
+        0.0
+      ]
+    ],
+    "mc_paths": 10000,
+    "precompute_children": true,
+    "fused_forward": true,
+    "gn_iters": 5,
+    "gn_damping": 0.01,
+    "gn_verbose": false
+  }
+}

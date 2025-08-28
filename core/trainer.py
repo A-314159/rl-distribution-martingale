@@ -1,0 +1,284 @@
+import time, math, json
+from dataclasses import dataclass, asdict
+from pathlib import Path
+import tensorflow as tf
+from tensorflow import keras
+import numpy as np
+from typing import Tuple
+
+from core.sampling import family, expand_family, SamplerConfig
+from core.critics import distribution_critic
+from core.actors import Actor
+from core.universe import UniverseBS
+
+from optimizers.gnlm import GaussNewtonLM
+
+from utilities.tensorflow_config import tf_compile
+from utilities.misc import HotKeys, to_csv
+import matplotlib.pyplot as plt
+from itertools import product
+
+
+@dataclass
+class TrainConfig:
+    optimizer: str = "adam"  # adam|sgd|rmsprop|gn|lm
+    lr: float = 1e-3
+    batch_size: int = 2 ** 16
+    max_epochs: int = 100000
+    max_time_sec: int = 7200
+    loss_tol_sqrt: float = 1e-4
+    hidden: tuple = (32, 32)
+    activation: str = "tanh"
+    model_dir: str = "saved_F_model_pkg"
+    log_csv: str = "training_log.csv"
+    chart_pdf: str = "comparison.pdf"
+    eval_pairs: list = None
+    mc_paths: int = 20000
+    # GN/LM extras
+    gn_iters: int = 5
+    gn_damping: float = 1e-2
+    gn_verbose: bool = False
+
+
+def _make_tf_optimizer(name, lr):
+    name = name.lower()
+    if name == "adam": return keras.optimizers.Adam(lr)
+    if name == "sgd": return keras.optimizers.SGD(lr, momentum=0.9, nesterov=True)
+    if name == "rmsprop": return keras.optimizers.RMSprop(lr)
+    raise ValueError(f"Unknown TF optimizer {name}")
+
+
+def _anneal_lambda(ep, cfg: TrainConfig):
+    # Use same defaults as before: start at 1.0 and linearly go to 0.0 in 10 epochs unless changed outside.
+    final = 0.0
+    init = 1.0
+    span = 10
+    if hasattr(cfg, "lambda_hint_final"): final = cfg.lambda_hint_final
+    if hasattr(cfg, "lambda_hint_init"):  init = cfg.lambda_hint_init
+    if hasattr(cfg, "lambda_hint_anneal_epochs"): span = cfg.lambda_hint_anneal_epochs
+    if span <= 0 or ep >= span: return final
+    f = ep / float(span)
+    return init * (1.0 - f) + final * f
+
+
+class DistributionTrainer:
+    def __init__(self, universe: UniverseBS, sampler_cfg: SamplerConfig, train_cfg: TrainConfig, actor: Actor):
+        self.universe = universe
+        self.sampler_cfg = sampler_cfg
+        self.cfg = train_cfg
+        self.data = None
+        self.model = None
+        self.actor = actor
+
+    def build(self, reload_model=False):
+
+        parent = family(self.sampler_cfg, self.universe)
+        self.data = expand_family(parent, self.universe)
+
+        # Model + adapt norm
+        self.model = distribution_critic(4, self.cfg.hidden, self.cfg.activation)
+        feats_null = tf.stack([self.data["t"], self.data["x"], self.data["y"], self.data["sqrt_tau"]], axis=1)
+        self.model.get_layer("norm").adapt(feats_null)
+
+        out_dir = Path(self.cfg.model_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # please suggest a solution for the bug below
+        bugged=True
+        if not bugged:
+            with open(out_dir / "hyperparams.json", "w") as f:
+                json.dump(
+                    {"universe": self.universe.__dict__, "sampler": asdict(self.sampler_cfg), "train": asdict(self.cfg)}, f,
+                    indent=2)
+        return self.model
+
+    def residuals_fn(self, data, lam, all_samples=False, detailed=False):
+        data = data
+        universe = self.universe
+        all_samples = all_samples
+
+        @tf_compile
+        def residuals(idx_batch: tf.Tensor) -> tf.Tensor:
+            r, _, _ = details(idx_batch)
+            return r
+
+        @tf_compile
+        def gather(idx_batch: tf.Tensor):
+            keys = ['t', 'sqrt_tau', 'x', 'x_lo', 'x_hi', 'y', 'y_lo', 'y_hi', 't_kids', 'sqrt_tau_kids',
+                    'x_kids', 'w_kids', 'terminal', 'dS', 'pv_kids', 'Y_hint']
+            values = []
+            for k in keys:
+                val=data[k] if all_samples else tf.gather(data[k], idx_batch)
+                values.append(val)
+            return tuple(values)
+
+        @tf_compile
+        def details(idx_batch: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+
+            t, sqrt_tau, x, x_lo, x_hi, y, y_lo, y_hi, t_c, sqrt_tau_c, x_c, w_c, terminal, dS, pv_c, Y_hint = (
+                gather(idx_batch))
+            t_c = tf.concat([t_c, t_c], axis=1)
+            sqrt_tau_c = tf.concat([sqrt_tau_c, sqrt_tau_c], axis=1)
+
+            q = self.actor(t, sqrt_tau, universe=universe)
+            l_prime = -q[:, None] * dS - tf.where(terminal, pv_c, 0)
+
+            y_c = y[:, None] - l_prime
+
+            parent = tf.stack([t, x, y, sqrt_tau], axis=1)
+            child = tf.stack([t_c, x_c, y_c, sqrt_tau_c], axis=-1)
+            child_flat = tf.reshape(child, (-1, 4))
+            fused = tf.concat([parent, child_flat], axis=0)
+            out = tf.squeeze(self.model(fused, training=True), -1)
+
+            # Compute F by model
+            F = out[:tf.shape(parent)[0]]
+            F_c = tf.reshape(out[tf.shape(parent)[0]:], tf.shape(x_c))
+
+            # Degeneracy of F versus y
+            one, zero = tf.ones_like(F_c), tf.ones_like(F_c)
+            F_c = tf.where(y_c <= y_lo[:, None], zero, tf.where(y_c >= y_hi[:, None], one, F_c))
+
+            # Degeneracy of F versus x
+            F_degenerate_x = tf.where(y_c > -pv_c, one, zero)
+            F_c = tf.where(tf.logical_or(x_c >= x_hi[:, None], x_c <= x_lo[:, None]), F_degenerate_x, F_c)
+
+            # Degeneracy of F at T
+            F_degenerate_T = tf.where(y_c >= 0, one, zero)
+            F_c = tf.where(terminal, F_degenerate_T, F_c)
+
+            # Blend with hint
+            Y_bellman = tf.reduce_sum(w_c * F_c, axis=1)
+            Y = (1.0 - lam) * Y_bellman + lam * Y_hint
+            r = F - Y
+            return r, F, Y
+
+        return details if detailed else residuals
+
+    def train(self):
+        out_dir = Path(self.cfg.model_dir)
+        csv_path = out_dir / self.cfg.log_csv
+        to_csv(csv_path, "w", ["epoch", "elapsed_sec", "rmse_loss", "lambda_hint"])
+
+        use_gn = self.cfg.optimizer.lower() in ("gn", "lm")
+        if use_gn:
+            opt = GaussNewtonLM(damping=self.cfg.gn_damping, max_iters=self.cfg.gn_iters, verbose=self.cfg.gn_verbose)
+        else:
+            opt = _make_tf_optimizer(self.cfg.optimizer, self.cfg.lr)
+
+        t0 = time.time()
+        N = int(self.data["t"].shape[0])
+        bsz = self.cfg.batch_size
+        hot = HotKeys()
+        epoch = 0
+        while epoch < self.cfg.max_epochs:
+
+            lam = tf.cast(_anneal_lambda(epoch, self.cfg), tf.keras.backend.floatx())
+            perm = tf.random.shuffle(tf.range(N))
+            losses = []
+
+            for start in range(0, N, bsz):
+                idx = perm[start: min(start + bsz, N)]
+                if use_gn:
+                    res_fn = self.residuals_fn(self.data, lam)
+                    try:
+                        opt.minimize(res_fn, self.model.trainable_variables)
+                    except AttributeError:
+                        if hasattr(opt, "step"):
+                            opt.step(res_fn, self.model.trainable_variables)
+                        else:
+                            raise
+                    r = res_fn(idx)
+                    losses.append(float(0.5 * tf.reduce_mean(tf.square(r)).numpy()))
+                else:
+                    with tf.GradientTape() as tape:
+                        res_fn = self.residuals_fn(self.data, lam)
+                        r = res_fn(idx)
+                        loss = 0.5 * tf.reduce_mean(tf.square(r))
+                    grads = tape.gradient(loss, self.model.trainable_variables)
+                    opt.apply_gradients(zip(grads, self.model.trainable_variables))
+                    losses.append(float(loss.numpy()))
+            if hot.show_chart:
+                self.chart(lam, np.array([0, self.universe.T - self.universe.h]))
+                hot.show_chart = False
+
+            rmse, elapsed = math.sqrt(sum(losses) / max(1, len(losses))), time.time() - t0
+            print(f"Epoch {epoch:04d}  rmse={rmse:.6e}  lambda={lam:.3f}  elapsed={elapsed:.1f}s")
+            to_csv(csv_path, "a", [epoch, f"{elapsed:.3f}", f"{rmse:.8e}", f"{lam:.6f}"])
+
+            if epoch % 20 == 0: self.model.save(out_dir / "model.keras")
+            if hot.stop or time.time() - t0 > self.cfg.max_time_sec or rmse < self.cfg.loss_tol_sqrt:
+                print(f"Termination either by user, tolerance, or max time")
+                break
+            epoch += 1
+
+        self.model.save(out_dir / "model.keras")
+        return self.model
+
+    def chart(self, lam, t, x=None, show=True, filename='F'):
+        N, cushion_y = 10001, 0.05
+        if x is None:
+            x = np.array([-0.3, -0.1, 0, 0.1, 0.2, 0.3])
+        y = np.linspace(-max(math.exp(x.max()) - 1, 0) - cushion_y, -max(math.exp(x.min()) - 1, 0) + cushion_y, N)
+        dy = (y.max() - y.min()) / (N - 1)
+
+        tp = tf.keras.backend.floatx()
+        _t, _x, _y = np.meshgrid(t, x, y, indexing='ij')
+        _t = tf.cast(tf.convert_to_tensor(_t.flatten()[:, None]), tp)
+        _x = tf.cast(tf.convert_to_tensor(_x.flatten()[:, None]), tp)
+        _y = tf.cast(tf.convert_to_tensor(_y.flatten()[:, None]), tp)
+
+        mums = family(kwargs={'t': _t, 'x': _x, 'y': _y})
+        families = expand_family(mums, self.universe)
+        res_fn = self.residuals_fn(families, lam, detailed=True, all_samples=True)
+        e, F, Y = res_fn()
+        e = e.numpy().reshape(t.size, x.size, y.size)
+        F = F.numpy().reshape(t.size, x.size, y.size)
+        T = Y.numpy().reshape(t.size, x.size, y.size)
+        mu = families['y_mu'].numpy().reshape(t.size, x.size, y.size)
+        f = np.zeros_like(F)
+        f[1:-1] = (F[2:] - F[:-2]) / dy
+
+        lw = [1, 0.5]
+        ls = ['-', '-']
+        fig, ax = plt.subplots(2, 2, figsize=(12.8, 9.6))
+        fig.suptitle(' ')
+
+        col = np.array([[0, 0], [0, 0]], dtype=object)
+        r_e, r_f, r_F = np.array([np.min(e), np.max(e)]), np.array([0, np.max(f)]), np.array([0, 1])
+        rg = np.array([[r_F, r_f], [r_f, r_e]])
+        for j, i in product(range(len(x)), range(t.size)):
+            #if x[j] < x_min_sampling[i, j, 0] or x[j] > x_max_sampling[i, j, 0]: continue
+            data = np.array([[F[i, j, :], f[i, j, :]], [T[i, j, :], e[i, j, :]]])
+            mu_x = np.array([mu[i, j, 0], mu[i, j, 0]])
+            for r, c in product(range(2), repeat=2):
+                if i == 0:
+                    line, = ax[r, c].plot(y, data[r, c], label='x=%.1f' % (x[j]), linewidth=lw[i], linestyle=ls[i])
+                    col[r, c] = line.get_color()
+                else:
+                    x[r, c].plot(y, data[r, c], color=col[r, c], linewidth=lw[i], linestyle=ls[i])
+                ax[r, c].plot(mu_x, rg[r, c], color=col[r, c], linestyle='--', linewidth=lw[i])
+
+        titles = np.array([
+            [r'Distribution at $t=%.2f$, $t=%0.2f$' % (t[0], t[1]), r'Density at $t=%.2f$, $t=%0.2f$' % (t[0], t[1])],
+            [r'Target at $t=%.2f$, $t=%0.2f$' % (t[0], t[1]), r'Error on $F$ at $t=%.2f$, $t=%0.2f$' % (t[0], t[1])]])
+        y_labels = np.array([[r'$F(y)$', r'$f(y)$'], [r'$T(y)$', r'$F(y)-T(y)$']])
+        for r, c in product(range(2), repeat=2):
+            ax[r, c].set_title(titles[r, c])
+            ax[r, c].set(xlabel=r'$y$', ylabel=y_labels[r, c])
+            ax[r, c].grid(True, color='silver', linestyle='--', linewidth=0.5)
+
+        lines_labels = [ax.get_legend_handles_labels() for ax in fig.axes]
+        lines, labels = [sum(lol, []) for lol in zip(*lines_labels)]
+        unique = [(h, l) for i, (h, l) in enumerate(zip(lines, labels)) if l not in labels[:i]]
+        fig.legend(*zip(*unique), ncol=len(unique), loc='upper center', fontsize='x-small')
+        fig.tight_layout()
+
+        #if not show:
+        #    file = util.paper_folder + '/' + filename + ".pdf"
+        #    if os.path.isfile(file):
+        #        os.remove(file)
+        #    plt.savefig(file, format='pdf', dpi=600)
+        #    plt.close()
+        #else:
+        plt.show()
