@@ -1,0 +1,55 @@
+------------------------------------------------------------
+Asked to chat gpt:
+
+The code is ready and tested. I improved it. I started to create abstract classes for Universe and Actor for future evolution of the project.
+Requests about the code and pycharm:
+1) Suggest one line of code to print a summary of configure(): using CPU with or w/ou DNN, GPU, precision, determinism, etc..
+2) I modified the Universe to be derived from an abstract class, not as a dataclass anymore. As a result, the creation of the hyperparams.json fails, can you suggest an edit?
+3) When running the code, it shows the error message below. Can you propose a fix:
+UserWarning: Even though the `tf.config.experimental_run_functions_eagerly` option is set, this option does not apply to tf.data functions. To force eager execution of tf.data functions, please use `tf.data.experimental.enable_debug_mode()`.
+  "Even though the `tf.config.experimental_run_functions_eagerly` "
+4) I am not satisfied with the code below because not generic if there are more than 2 children. Suggest a edit:
+            t_c = tf.concat([t_c, t_c], axis=1)
+            sqrt_tau_c = tf.concat([sqrt_tau_c, sqrt_tau_c], axis=1)
+5) When I enter c in the console, its says the following. The hotkey does not work. Please suggest something.
+PyDev console: starting.
+Python 3.7.13 (default, Oct 20 2022, 10:24:38) [MSC v.1916 64 bit (AMD64)] on win32
+c
+Traceback (most recent call last):
+  File "C:\Users\antoi\anaconda3\envs\p37\lib\code.py", line 90, in runcode
+    exec(code, self.locals)
+  File "<input>", line 1, in <module>
+NameError: name 'c' is not defined
+6) Apply consistent string convention across the project.
+7) For UniverseBS, I do the casting to tf.keras.backend.floatx() in the __init__. Suggest how to do the same elsewhere.
+8) Finish the code to dump the distribution chart (in trainer chart) to a file.
+9) Can you suggest a way to package the optimizer (usual ones or gnml) so that their usages do not need a 'if use_gn' condition in the batch loop?
+10) I am not using __init__.py because I can not make it work with pycharm. Help
+11) Can you finish the way to reload the model so that one can continue its training with the same sampling and training (by appending convergence to the existing file), or different ones (by saving another hyperparameters json and creating a new convergence file). This means that for the same model, we can have a list of json and traing log file, that should be numbered.
+12) Review the overall code, make suggestions for more standard coding or else
+13) In Pycharm, it seems that path folders for importing instructions are different from what you proposed. Can you suggest a way to import that is more convential and generic than mine, if any.
+14) Suggest some unit and integration tests
+
+
+Can you write a short user guide about how to use github:
+1) When I make a change in the code from pycharm locally, do I need to commit and push?
+2) When someone made a change in the repo, how can I get the fresh version in pycharm? For instance, I removed a folder in the repo via github on the web. But it is still in my local version.
+3) What is the difference between commit and put?
+
+------------------------------------------------------------
+My todo list:
+a) Do the edits to the code (some remaining to do)
+b) Test in full once the chart is available to check if the distribution converges. Try GNLM, LBFGS. Try float32, with graph exec. Debug on hint distribution for now.
+b-bis) Once working, launch a long training
+c) Try the agent
+d) Try the cloud computing
+e) Build a word document to summarize what I did to create the repo, commit, push, how to use github, use the agent, use cloud computing via github
+
+------------------------------------------------------------
+Request to chat gpt about the paper: (not done yet)
+I will rewrite a bit the better later. The concept is that my work is more generic that for just the example of hedging in finance.
+What I think is new in the approach includes:
+a) The usage of very small discretization for the evaluation of expectation in bellman equation. Generically possible if there is a model for the universe (empirical or theoretical) for short time evolution because the error is proportion to the time step. This avoids freezing gradients as in some other RL approaches. (I never saw such an approach)
+b) A simple representation of the distribution, without the need to ensure monotonicity. (I read some papers that imposed monotonicity via complicated things)
+Do you think that the above items are indeed new? Do you think they can be useful for other RL problems, outside or in the field of finance?
+Can you find references of articles for comparison?
