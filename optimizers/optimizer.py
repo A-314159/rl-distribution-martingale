@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow import keras
 from optimizers.gnlm import GaussNewtonLM
 from optimizers.tfp_lbfgs import LBFGS
-from utilities.tensorflow_config import tf_compile
+from utilities.tensorflow_config import tf_compile, LOW, HIGH, SENSITIVE_CALC
 
 
 class Optimizer:
@@ -36,7 +36,7 @@ class Optimizer:
     @tf_compile
     def _loss(self):
         r = self.function()
-        return 0.5 * tf.reduce_mean(tf.square(r))
+        return tf.cast(0.5 * tf.reduce_mean(tf.square(r)), HIGH)
 
     @tf_compile
     def gd(self):

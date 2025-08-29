@@ -10,45 +10,16 @@ from core.sampling import family, expand_family, SamplerConfig, cast_data_low
 from core.critics import distribution_critic
 from core.actors import Actor
 from core.universe import UniverseBS
+from core.train_config import TrainConfig
 
 from optimizers.gnlm import GaussNewtonLM
 from optimizers.optimizer import Optimizer
 
-from utilities.tensorflow_config import tf_compile, LOW, HIGH
+from utilities.tensorflow_config import tf_compile, LOW, HIGH, SENSITIVE_CALC
 from utilities.misc import HotKeys, to_csv, jsonable
 import matplotlib.pyplot as plt
 from itertools import product
 
-
-@dataclass
-class TrainConfig:
-    optimizer: str = "adam"  # adam|sgd|rmsprop|gn|lm
-    batch_size: int = 2 ** 10
-    full_batch: bool = False
-    max_epochs: int = 100000
-    max_time_sec: int = 7200
-    loss_tol_sqrt: float = 1e-4
-    hidden: tuple = (32, 32)
-    activation: str = "tanh"
-    model_dir: str = "no name"
-    log_csv: str = "training_log.csv"
-    eval_pairs: list = None
-    mc_paths: int = 20000
-    # gauss newton levenberg marquardt
-    gn_iters: int = 10
-    gn_damping: float = 1e-2
-    gn_verbose: bool = False
-    # limited memory BFGS
-    lbfgs_iters: int = 50
-    lbfgs_tol: float = 1e-6
-    lbfgs_verbose: bool = False
-    # other optimizers by gradient descent
-    lr: float = 1e-3
-    # blending between hint and bellman
-    anneal_beta_period = 1000000
-    # distribution chart
-    show_chart: bool = False  # False: output to file
-    chart_pdf: str = "distribution.pdf"
 
 
 class DistributionTrainer:
@@ -63,7 +34,7 @@ class DistributionTrainer:
 
         parent = family(self.sampler_cfg, self.universe)
         self.data = expand_family(parent, self.universe)
-        self.data = cast_data_low(self.data, high_keys=['t', 'sqrt_tau', 'dS', 'pv_kids', 'Y_hint'])
+        self.data = cast_data_low(self.data, no_cast_keys=['t', 'sqrt_tau', 'dS', 'pv_kids', 'Y_hint'])
 
         # Model + adapt norm
         self.model = distribution_critic(4, self.train_cfg.hidden, self.train_cfg.activation)
@@ -75,7 +46,7 @@ class DistributionTrainer:
 
         with open(out_dir / "hyperparams.json", "w") as f:
             json.dump({"universe": jsonable(self.universe), "actor": jsonable(self.actor),
-                       "sampler": asdict(self.sampler_cfg), "train": asdict(self.train_cfg)}, f, indent=2)
+                       "sampler": asdict(self.sampler_cfg), "train": jsonable(self.train_cfg)}, f, indent=2)
 
         return self.model
 
@@ -105,7 +76,7 @@ class DistributionTrainer:
             t_c = tf.repeat(t_c, repeats=nb_kids, axis=1)
             sqrt_tau_c = tf.repeat(sqrt_tau_c, repeats=nb_kids, axis=1)
 
-            # This should be done in FP32 at least
+            # This should be _done in FP32 at least
             q = self.actor(t, sqrt_tau, universe=universe)
             l_prime = -q[:, None] * dS - tf.where(term, pv_c, 0)
             y_c = y[:, None] - l_prime
@@ -115,7 +86,9 @@ class DistributionTrainer:
             child = tf.cast(tf.stack([t_c, x_c, y_c, sqrt_tau_c], axis=-1), LOW)
             child_flat = tf.reshape(child, (-1, 4))
             fused = tf.concat([parent, child_flat], axis=0)
-            F = tf.cast(tf.squeeze(self.model(fused, training=True), -1), HIGH)
+
+            sensitive_type = SENSITIVE_CALC if self.train_cfg.cast_64 else HIGH
+            F = tf.cast(tf.squeeze(self.model(fused, training=True), -1), sensitive_type)
 
             # Split F at parent and children
             F, F_c = F[:tf.shape(parent)[0]], tf.reshape(F[tf.shape(parent)[0]:], tf.shape(x_c))
@@ -135,7 +108,7 @@ class DistributionTrainer:
             F_c = tf.where(term, F_degenerate_T, F_c)
 
             # Blend with hint
-            Y_bellman = tf.reduce_sum(w_c * F_c, axis=1)
+            Y_bellman = tf.reduce_sum(tf.cast(w_c, sensitive_type) * F_c, axis=1)
             Y = self._beta * Y_bellman + (1.0 - self._beta) * Y_hint
             r = F - Y
             return r, F, Y

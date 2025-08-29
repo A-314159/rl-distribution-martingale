@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import tensorflow as tf
 from core.bs import bs_call_price
 from utilities.misc import cast_all, cdf
-from utilities.tensorflow_config import tf_compile, LOW, HIGH
+from utilities.tensorflow_config import tf_compile, LOW, HIGH, SENSITIVE_CALC
 from core.universe import UniverseBS
 
 
@@ -89,7 +89,7 @@ def family(cfg: SamplerConfig, u, txy=None) -> dict:
     # -----------------------------
     # prepare hint for the distribution
     # -----------------------------
-    Y_hint = cdf((y - y_mu) / y_half)
+    Y_hint = cdf(tf.cast(tf.cast((y - y_mu) / y_half), SENSITIVE_CALC))
 
     # -----------------------------
     # To save memory:
@@ -100,8 +100,7 @@ def family(cfg: SamplerConfig, u, txy=None) -> dict:
         t=t, sqrt_tau=sqrt_tau,
         x=x, x_hi=tf.cast(x_hi, LOW), x_lo=tf.cast(x_lo, LOW),
         y=y, y_lo=tf.cast(y_lo, LOW), y_hi=tf.cast(y_hi, LOW),
-        Y_hint=Y_hint
-    )
+        Y_hint=Y_hint)
 
 
 @tf_compile
@@ -127,7 +126,7 @@ def expand_family(parents: dict, universe: UniverseBS) -> dict:
     return parents
 
 
-def cast_data_low(data_dictionary, high_keys):
+def cast_data_low(data_dictionary, no_cast_keys):
     for (k, v) in data_dictionary:
-        if k not in high_keys:
-            if v.dtype == HIGH: data_dictionary[k] = tf.cast(v, LOW)
+        if k not in no_cast_keys:
+            if v.dtype in (HIGH, SENSITIVE_CALC): data_dictionary[k] = tf.cast(v, LOW)

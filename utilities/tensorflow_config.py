@@ -32,9 +32,9 @@ _REDUCE_RETRACING = True
 _JIT_DEFAULT = False
 _PRECISION = "float32"
 _DATASET_DETERMINISTIC = True
-LOW = None
-HIGH = None
-
+LOW = 0
+HIGH = 0
+SENSITIVE_CALC = 0
 
 # ---------- Public API ----------
 
@@ -76,11 +76,12 @@ def configure(*,
     :return:
     """
 
-    global _REDUCE_RETRACING, _JIT_DEFAULT, _PRECISION, _DATASET_DETERMINISTIC, LOW, HIGH
+    global _REDUCE_RETRACING, _JIT_DEFAULT, _PRECISION, _DATASET_DETERMINISTIC, LOW, HIGH, SENSITIVE_CALC
     _REDUCE_RETRACING = reduce_retracing
     _JIT_DEFAULT = bool(jit_compile) or (mode == "graph_xla")
     _PRECISION = precision
     _DATASET_DETERMINISTIC = deterministic_shuffling
+
 
     if "tensorflow" in sys.modules:
         raise RuntimeError("configure() must run before importing TensorFlow")
@@ -122,7 +123,7 @@ def configure(*,
         raise ValueError("precision must be 'float32', 'float64', or 'mixed16'")
 
     pol = mp.global_policy()
-    LOW, HIGH = tf.as_dtype(pol.compute_dtype), tf.as_dtype(pol.variable_dtype)
+    LOW, HIGH, SENSITIVE_CALC = tf.as_dtype(pol.compute_dtype), tf.as_dtype(pol.variable_dtype), tf.float64
 
     # CPU threading
     if num_threads_CPU is not None:
