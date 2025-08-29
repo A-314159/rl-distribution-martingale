@@ -63,7 +63,7 @@ class DistributionTrainer:
 
         parent = family(self.sampler_cfg, self.universe)
         self.data = expand_family(parent, self.universe)
-        self.data = cast_data_low(self.data, high_keys=['t', 'sqrt_tau', 'dS', 'pv_kids'])
+        self.data = cast_data_low(self.data, high_keys=['t', 'sqrt_tau', 'dS', 'pv_kids', 'Y_hint'])
 
         # Model + adapt norm
         self.model = distribution_critic(4, self.train_cfg.hidden, self.train_cfg.activation)
@@ -111,8 +111,8 @@ class DistributionTrainer:
             y_c = y[:, None] - l_prime
 
             # Compute model in LOW precision and cast output to HIGH
-            parent = tf.stack([t, x, y, sqrt_tau], axis=1)
-            child = tf.stack([t_c, x_c, y_c, sqrt_tau_c], axis=-1)
+            parent = tf.cast(tf.stack([t, x, y, sqrt_tau], axis=1), LOW)
+            child = tf.cast(tf.stack([t_c, x_c, y_c, sqrt_tau_c], axis=-1), LOW)
             child_flat = tf.reshape(child, (-1, 4))
             fused = tf.concat([parent, child_flat], axis=0)
             F = tf.cast(tf.squeeze(self.model(fused, training=True), -1), HIGH)
