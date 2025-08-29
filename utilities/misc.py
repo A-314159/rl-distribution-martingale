@@ -50,18 +50,30 @@ def jsonable(obj):
 
 class HotKeys:
     def __init__(self):
-        self.stop = False
-        self.show_chart = False
+        self._q = False
+        self._c = False
         threading.Thread(target=self._listen, daemon=True).start()
+
+    @property
+    def q(self):
+        k = self._q
+        self._q = False
+        return k
+
+    @property
+    def c(self):
+        k = self._c
+        self._c = False
+        return k
 
     def _listen(self):
         try:
             for line in sys.stdin:
                 cmd = line.strip().lower()
                 if cmd == "q":
-                    self.stop = True
+                    self._q = True
                 elif cmd == "c":
-                    self.show_chart = True
+                    self._c = True
         except Exception:
             pass
 
@@ -69,3 +81,19 @@ class HotKeys:
 def to_csv(csv_path, mode, data):
     with open(csv_path, mode, newline="") as f:
         csv.writer(f).writerow(data)
+
+
+@tf_compile
+def pack(vars_list):
+    return tf.concat([tf.reshape(v, [-1]) for v in vars_list], axis=0)
+
+
+@tf_compile
+def unpack_like(vec, vars_like):
+    parts, offset = [], 0
+    for v in vars_like:
+        size = tf.size(v)
+        part = tf.reshape(vec[offset: offset + size], tf.shape(v))
+        parts.append(part)
+        offset += size
+    return parts

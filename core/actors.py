@@ -3,7 +3,7 @@ from abc import ABC
 import tensorflow as tf
 from core.universe import UniverseBS
 from core.bs import bs_delta  # your dtype-safe helper
-from utilities.tensorflow_config import tf_compile
+from utilities.tensorflow_config import tf_compile, LOW, HIGH
 from utilities.misc import cast_all
 import abc
 
@@ -23,8 +23,7 @@ class BSDeltaHedge(Actor, ABC):
 
     @tf_compile
     def __call__(self, *data, universe: UniverseBS) -> tf.Tensor:
-        st = tf.keras.backend.floatx()
-        (sigma, K) = cast_all(universe.sigma, universe.K, dtype=st)
+        (sigma, K) = cast_all(universe.sigma, universe.K, dtype=HIGH)
         x, d = data[0], data[1] * sigma
         return -bs_delta(x, d, K)
 

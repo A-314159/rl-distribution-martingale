@@ -1,7 +1,7 @@
 from abc import ABC
 from dataclasses import dataclass
 import tensorflow as tf
-from utilities.tensorflow_config import tf_compile
+from utilities.tensorflow_config import tf_compile, HIGH
 from utilities.misc import set_attributes, cast_all
 import abc
 
@@ -33,8 +33,7 @@ class UniverseBS(Universe, ABC):
 
     @tf_compile
     def cast(self):
-        tp = tf.keras.backend.floatx()
-        self.sigma, self.T, self.h, self.K = cast_all(self.sigma, self.T, self.h, self.K, dtype=tp)
+        self.sigma, self.T, self.h, self.K = cast_all(self.sigma, self.T, self.h, self.K, dtype=HIGH)
 
     @tf_compile
     def children(*args):

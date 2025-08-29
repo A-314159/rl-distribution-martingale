@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import tensorflow as tf
 from core.bs import bs_call_price
 from utilities.misc import cast_all, cdf
-from utilities.tensorflow_config import tf_compile
+from utilities.tensorflow_config import tf_compile, LOW, HIGH
 from core.universe import UniverseBS
 
 
@@ -10,7 +10,7 @@ from core.universe import UniverseBS
 class SamplerConfig:
     N: int = 60000
     x0: float = 0.0
-    a: float = 0.3
+    a: float = 0.3  # range around [x0: x0-a, x0+a]
     b: float = 4.0  # multiple of deviation for x
     c: float = 1 / 52  # cushion for residual maturity
     r0: float = 0.02
@@ -28,10 +28,10 @@ def family(cfg: SamplerConfig, u, txy=None) -> dict:
     """
     N = cfg.N
     rng = tf.random
-    tp = tf.keras.backend.floatx()
+    dtype = HIGH
     # todo: put the casting in the configuration init instead
     h, T, sigma, K = u.h, u.T, u.sigma, u.K
-    (x0, a, b, c, r0, r1) = cast_all(cfg.x0, cfg.a, cfg.b, cfg.c, cfg.r0, cfg.r1, dtype=tp)
+    (x0, a, b, c, r0, r1) = cast_all(cfg.x0, cfg.a, cfg.b, cfg.c, cfg.r0, cfg.r1, dtype=dtype)
 
     usable_dict = isinstance(txy, dict)
     if usable_dict:
@@ -47,7 +47,7 @@ def family(cfg: SamplerConfig, u, txy=None) -> dict:
         k = tf.cast(t, tf.int32)
     else:
         k = rng.uniform(shape=(N,), minval=0, maxval=u.P, dtype=tf.int32)
-    k = tf.cast(k, tp)
+    k = tf.cast(k, dtype)
     t = k * h
     tau = T - t
     sqrt_tau = tf.sqrt(tau)
@@ -69,7 +69,7 @@ def family(cfg: SamplerConfig, u, txy=None) -> dict:
     if usable_dict:
         x = txy['x']
     else:
-        u = rng.uniform(shape=(N,), minval=0., maxval=1., dtype=tp)
+        u = rng.uniform(shape=(N,), minval=0., maxval=1., dtype=dtype)
         x = x_lo_s + u * (x_hi_s - x_lo_s)
 
     # -----------------------------
@@ -83,17 +83,23 @@ def family(cfg: SamplerConfig, u, txy=None) -> dict:
     if usable_dict:
         y = txy['y']
     else:
-        u = rng.uniform(shape=(N,), minval=0., maxval=1., dtype=tp)
+        u = rng.uniform(shape=(N,), minval=0., maxval=1., dtype=dtype)
         y = y_lo + u * (y_hi - y_lo)
 
     # -----------------------------
     # prepare hint for the distribution
     # -----------------------------
     Y_hint = cdf((y - y_mu) / y_half)
+
+    # -----------------------------
+    # To save memory:
+    # a) store only the variables that are needed or that would take really too much time to recompute at each epoch.
+    # b) cast to LOW precision variables that will not require HIGH precision.
+    # -----------------------------
     return dict(
         t=t, sqrt_tau=sqrt_tau,
-        x=x, x_hi=x_hi, x_lo=x_lo,
-        y=y, y_lo=y_lo, y_hi=y_hi, y_mu=y_mu,
+        x=x, x_hi=tf.cast(x_hi, LOW), x_lo=tf.cast(x_lo, LOW),
+        y=y, y_lo=tf.cast(y_lo, LOW), y_hi=tf.cast(y_hi, LOW),
         Y_hint=Y_hint
     )
 
@@ -115,7 +121,13 @@ def expand_family(parents: dict, universe: UniverseBS) -> dict:
     pv_kids = bs_call_price(x_kids, sigma * sqrt_tau_kids, K)
 
     parents.update(dict(
-        x_kids=x_kids, w_kids=w_kids, t_kids=t_kids, terminal=terminal,
-        dS=dS, pv_kids=pv_kids, tau_kids=tau_kids, sqrt_tau_kids=sqrt_tau_kids
+        x_kids=tf.cast(x_kids, LOW), w_kids=w_kids, t_kids=tf.cast(t_kids, LOW), terminal=terminal,
+        dS=dS, pv_kids=pv_kids, sqrt_tau_kids=tf.cast(sqrt_tau_kids, LOW)
     ))
     return parents
+
+
+def cast_data_low(data_dictionary, high_keys):
+    for (k, v) in data_dictionary:
+        if k not in high_keys:
+            if v.dtype == HIGH: data_dictionary[k] = tf.cast(v, LOW)

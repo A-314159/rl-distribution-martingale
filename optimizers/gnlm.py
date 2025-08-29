@@ -2,22 +2,7 @@ from abc import ABC
 
 import tensorflow as tf
 from utilities.tensorflow_config import tf_compile
-
-
-@tf_compile
-def pack_vars(vars_list):
-    return tf.concat([tf.reshape(v, [-1]) for v in vars_list], axis=0)
-
-
-@tf_compile
-def unpack_like(vec, vars_like):
-    parts, offset = [], 0
-    for v in vars_like:
-        size = tf.size(v)
-        part = tf.reshape(vec[offset: offset + size], tf.shape(v))
-        parts.append(part)
-        offset += size
-    return parts
+from utilities.misc import unpack_like, pack
 
 
 @tf_compile
@@ -40,10 +25,11 @@ def residuals(model, x, y):
 # =========================================================
 class GaussNewtonLM(tf.keras.optimizers.Optimizer, ABC):
     def __init__(self, lam=1e-2, cg_tol=1e-6, cg_iters=50, name="GNLM", **kwargs):
-        super().__init__(name, **kwargs)
-        self.lam = tf.constant(lam, dtype=tf.float32)
-        self.cg_tol = tf.constant(cg_tol, dtype=tf.float32)
-        self.cg_iters = tf.constant(cg_iters, dtype=tf.int32)
+        super().__init__(name=name)
+        self._type = tf.keras.backend.floatx()
+        self.lam = tf.constant(lam, dtype=self._type)
+        self.cg_tol = tf.constant(cg_tol, dtype=self._type)
+        self.cg_iters = tf.constant(cg_iters, dtype=self._type)
 
     def get_config(self):
         cfg = super().get_config()
@@ -81,7 +67,7 @@ class GaussNewtonLM(tf.keras.optimizers.Optimizer, ABC):
             r = residuals_fn()
             loss = 0.5 * tf.reduce_mean(tf.square(r))
         g_list = tape.gradient(loss, var_list)
-        g_flat = pack_vars([tf.zeros_like(v) if g is None else g for v, g in zip(var_list, g_list)])
+        g_flat = pack([tf.zeros_like(v) if g is None else g for v, g in zip(var_list, g_list)])
         b = -g_flat
 
         # matvec: v -> J^T J v + lam v  (no explicit Jacobian)
@@ -94,9 +80,9 @@ class GaussNewtonLM(tf.keras.optimizers.Optimizer, ABC):
             # Reverse VJP: J^T u
             with tf.GradientTape() as tape2:
                 r2 = residuals_fn()
-                inner = tf.reduce_sum(r2 * tf.stop_gradient(u)) / tf.cast(tf.size(r2), tf.float32)
+                inner = tf.reduce_sum(r2 * tf.stop_gradient(u)) / tf.cast(tf.size(r2), self._type)
             jtju_list = tape2.gradient(inner, var_list)
-            jtju_flat = pack_vars([tf.zeros_like(v) if g is None else g for v, g in zip(var_list, jtju_list)])
+            jtju_flat = pack([tf.zeros_like(v) if g is None else g for v, g in zip(var_list, jtju_list)])
             return jtju_flat + self.lam * v_flat
 
         # Solve for delta with CG and apply
@@ -105,6 +91,7 @@ class GaussNewtonLM(tf.keras.optimizers.Optimizer, ABC):
         return loss, tf.norm(g_flat), tf.norm(delta)
 
 
+# todo: remove if confirmed not useful
 @tf_compile
 def standard_step(model, x, y, opt):
     with tf.GradientTape() as tape:

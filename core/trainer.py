@@ -1,4 +1,4 @@
-import time, math, json
+import time, math, json, os
 from dataclasses import dataclass, asdict
 from pathlib import Path
 import tensorflow as tf
@@ -6,7 +6,7 @@ from tensorflow import keras
 import numpy as np
 from typing import Tuple
 
-from core.sampling import family, expand_family, SamplerConfig
+from core.sampling import family, expand_family, SamplerConfig, cast_data_low
 from core.critics import distribution_critic
 from core.actors import Actor
 from core.universe import UniverseBS
@@ -14,7 +14,7 @@ from core.universe import UniverseBS
 from optimizers.gnlm import GaussNewtonLM
 from optimizers.optimizer import Optimizer
 
-from utilities.tensorflow_config import tf_compile
+from utilities.tensorflow_config import tf_compile, LOW, HIGH
 from utilities.misc import HotKeys, to_csv, jsonable
 import matplotlib.pyplot as plt
 from itertools import product
@@ -23,7 +23,7 @@ from itertools import product
 @dataclass
 class TrainConfig:
     optimizer: str = "adam"  # adam|sgd|rmsprop|gn|lm
-    batch_size: int = 2 ** 16
+    batch_size: int = 2 ** 10
     full_batch: bool = False
     max_epochs: int = 100000
     max_time_sec: int = 7200
@@ -32,11 +32,10 @@ class TrainConfig:
     activation: str = "tanh"
     model_dir: str = "no name"
     log_csv: str = "training_log.csv"
-    chart_pdf: str = "distribution.pdf"
     eval_pairs: list = None
     mc_paths: int = 20000
     # gauss newton levenberg marquardt
-    gn_iters: int = 5
+    gn_iters: int = 10
     gn_damping: float = 1e-2
     gn_verbose: bool = False
     # limited memory BFGS
@@ -45,46 +44,38 @@ class TrainConfig:
     lbfgs_verbose: bool = False
     # other optimizers by gradient descent
     lr: float = 1e-3
-
-
-def _anneal_lambda(ep, cfg: TrainConfig):
-    # Use same defaults as before: start at 1.0 and linearly go to 0.0 in 10 epochs unless changed outside.
-    final = 1.0
-    init = 1.0
-    span = 10
-    if hasattr(cfg, "lambda_hint_final"): final = cfg.lambda_hint_final
-    if hasattr(cfg, "lambda_hint_init"):  init = cfg.lambda_hint_init
-    if hasattr(cfg, "lambda_hint_anneal_epochs"): span = cfg.lambda_hint_anneal_epochs
-    if span <= 0 or ep >= span: return final
-    f = ep / float(span)
-    return init * (1.0 - f) + final * f
+    # blending between hint and bellman
+    anneal_beta_period = 1000000
+    # distribution chart
+    show_chart: bool = False  # False: output to file
+    chart_pdf: str = "distribution.pdf"
 
 
 class DistributionTrainer:
     def __init__(self, universe: UniverseBS, sampler_cfg: SamplerConfig, train_cfg: TrainConfig, actor: Actor):
-        self.universe = universe
-        self.sampler_cfg = sampler_cfg
-        self.cfg = train_cfg
-        self.data = None
-        self.model = None
-        self.actor = actor
+        self.universe, self.sampler_cfg, self.train_cfg = universe, sampler_cfg, train_cfg
+        self.data, self.model, self.actor = None, None, actor
+
+        # private
+        self._beta = self._batch = None
 
     def build(self, reload_model=False):
 
         parent = family(self.sampler_cfg, self.universe)
         self.data = expand_family(parent, self.universe)
+        self.data = cast_data_low(self.data, high_keys=['t', 'sqrt_tau', 'dS', 'pv_kids'])
 
         # Model + adapt norm
-        self.model = distribution_critic(4, self.cfg.hidden, self.cfg.activation)
+        self.model = distribution_critic(4, self.train_cfg.hidden, self.train_cfg.activation)
         feats_null = tf.stack([self.data["t"], self.data["x"], self.data["y"], self.data["sqrt_tau"]], axis=1)
         self.model.get_layer("norm").adapt(feats_null)
 
-        out_dir = Path(self.cfg.model_dir)
+        out_dir = Path(self.train_cfg.model_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         with open(out_dir / "hyperparams.json", "w") as f:
             json.dump({"universe": jsonable(self.universe), "actor": jsonable(self.actor),
-                       "sampler": asdict(self.sampler_cfg), "train": asdict(self.cfg)}, f, indent=2)
+                       "sampler": asdict(self.sampler_cfg), "train": asdict(self.train_cfg)}, f, indent=2)
 
         return self.model
 
@@ -92,104 +83,105 @@ class DistributionTrainer:
         universe = self.universe
 
         @tf_compile
-        def residuals(lam, idx_batch: tf.Tensor = None) -> tf.Tensor:
-            r, _, _ = details(lam, idx_batch)
+        def residuals() -> tf.Tensor:
+            r, _, _ = details()
             return r
 
         @tf_compile
-        def gather(idx_batch: tf.Tensor):
+        def gather():
             keys = ['t', 'sqrt_tau', 'x', 'x_lo', 'x_hi', 'y', 'y_lo', 'y_hi', 't_kids', 'sqrt_tau_kids',
                     'x_kids', 'w_kids', 'terminal', 'dS', 'pv_kids', 'Y_hint']
             values = []
             for k in keys:
-                val = data[k] if idx_batch is None else tf.gather(data[k], idx_batch)
+                val = data[k] if self._batch is None else tf.gather(data[k], self._batch)
                 values.append(val)
             return tuple(values)
 
         @tf_compile
-        def details(lam, idx_batch: tf.Tensor = None) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-            t, sqrt_tau, x, x_lo, x_hi, y, y_lo, y_hi, t_c, sqrt_tau_c, x_c, w_c, terminal, dS, pv_c, Y_hint = (
-                gather(idx_batch))
+        def details() -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+            t, sqrt_tau, x, x_lo, x_hi, y, y_lo, y_hi, t_c, sqrt_tau_c, x_c, w_c, term, dS, pv_c, Y_hint = gather()
 
             nb_kids = tf.shape(x_c)[1]
             t_c = tf.repeat(t_c, repeats=nb_kids, axis=1)
             sqrt_tau_c = tf.repeat(sqrt_tau_c, repeats=nb_kids, axis=1)
 
+            # This should be done in FP32 at least
             q = self.actor(t, sqrt_tau, universe=universe)
-            l_prime = -q[:, None] * dS - tf.where(terminal, pv_c, 0)
-
+            l_prime = -q[:, None] * dS - tf.where(term, pv_c, 0)
             y_c = y[:, None] - l_prime
 
+            # Compute model in LOW precision and cast output to HIGH
             parent = tf.stack([t, x, y, sqrt_tau], axis=1)
             child = tf.stack([t_c, x_c, y_c, sqrt_tau_c], axis=-1)
             child_flat = tf.reshape(child, (-1, 4))
             fused = tf.concat([parent, child_flat], axis=0)
-            out = tf.squeeze(self.model(fused, training=True), -1)
+            F = tf.cast(tf.squeeze(self.model(fused, training=True), -1), HIGH)
 
-            # Compute F by model
-            F = out[:tf.shape(parent)[0]]
-            F_c = tf.reshape(out[tf.shape(parent)[0]:], tf.shape(x_c))
+            # Split F at parent and children
+            F, F_c = F[:tf.shape(parent)[0]], tf.reshape(F[tf.shape(parent)[0]:], tf.shape(x_c))
+
+            # Boundaries for degeneracy are in LOW, distributions are in HIGH
 
             # Degeneracy of F versus y
             one, zero = tf.ones_like(F_c), tf.ones_like(F_c)
             F_c = tf.where(y_c <= y_lo[:, None], zero, tf.where(y_c >= y_hi[:, None], one, F_c))
 
             # Degeneracy of F versus x
-            F_degenerate_x = tf.where(y_c > -pv_c, one, zero)
+            F_degenerate_x = tf.where(y_c > -tf.cast(pv_c, LOW), one, zero)
             F_c = tf.where(tf.logical_or(x_c >= x_hi[:, None], x_c <= x_lo[:, None]), F_degenerate_x, F_c)
 
             # Degeneracy of F at T
             F_degenerate_T = tf.where(y_c >= 0, one, zero)
-            F_c = tf.where(terminal, F_degenerate_T, F_c)
+            F_c = tf.where(term, F_degenerate_T, F_c)
 
             # Blend with hint
             Y_bellman = tf.reduce_sum(w_c * F_c, axis=1)
-            Y = (1.0 - lam) * Y_bellman + lam * Y_hint
+            Y = self._beta * Y_bellman + (1.0 - self._beta) * Y_hint
             r = F - Y
             return r, F, Y
 
         return details if detailed else residuals
 
     def train(self):
-        out_dir = Path(self.cfg.model_dir)
-        csv_path = out_dir / self.cfg.log_csv
-        to_csv(csv_path, "w", ["epoch", "elapsed_sec", "rmse_loss", "lambda_hint"])
+        out_dir = Path(self.train_cfg.model_dir)
+        csv_path = out_dir / self.train_cfg.log_csv
+        to_csv(csv_path, "w", ["epoch", "elapsed_sec", "rmse_loss", "beta_blending"])
+        model, universe, cfg, data = self.model, self.universe, self.train_cfg, self.data
 
-        opt = Optimizer(self.cfg, self.model, self.residuals_fn(self.data))
-        t0 = time.time()
-        N = int(self.data["t"].shape[0])
-        hot = HotKeys()
-        epoch = 0
-        while epoch < self.cfg.max_epochs:
+        opt = Optimizer(cfg, model, self.residuals_fn(data))
 
-            lam = tf.cast(_anneal_lambda(epoch, self.cfg), tf.keras.backend.floatx())
+        full_batch = opt.require_full_batch or cfg.full_batch
+        epoch, t0, hot, N = 0, time.time(), HotKeys(), int(data["t"].shape[0])
+        while epoch < cfg.max_epochs:
+
+            # self._beta = tf.cast(min(epoch / cfg.anneal_beta_period, 1.0), HIGH)
+            self._beta = 0.0
             losses = []
-            if self.cfg.full_batch or opt.require_full_batch:
-                losses.append(opt.run(lam))
+            if full_batch:
+                self._batch = None
+                losses.append(opt.run())
             else:
                 perm = tf.random.shuffle(tf.range(N))
-                for start in range(0, N, self.cfg.batch_size):
-                    idx = perm[start:min(start + self.cfg.batch_size, N)]
-                    losses.append(opt.run(lam, idx))
+                for start in range(0, N, cfg.batch_size):
+                    self._batch = perm[start:min(start + cfg.batch_size, N)]
+                    losses.append(opt.run())
 
-            if hot.show_chart:
-                self.chart(lam, np.array([0, self.universe.T - self.universe.h]))
-                hot.show_chart = False
+            if hot.c: self.chart(t=np.array([0, universe.T - universe.h]), show_chart=cfg.show_chart)
 
             rmse, elapsed = math.sqrt(sum(losses) / max(1, len(losses))), time.time() - t0
-            print(f"Epoch {epoch:04d}  rmse={rmse:.6e}  lambda={lam:.3f}  elapsed={elapsed:.1f}s")
-            to_csv(csv_path, "a", [epoch, f"{elapsed:.3f}", f"{rmse:.8e}", f"{lam:.6f}"])
+            print(f"Epoch {epoch:04d}  rmse={rmse:.6e}  beta={self._beta:.3f}  elapsed={elapsed:.1f}s")
+            to_csv(csv_path, "a", [epoch, f"{elapsed:.3f}", f"{rmse:.8e}", f"{self._beta:.6f}"])
 
-            if epoch % 20 == 0: self.model.save(out_dir / "model.keras")
-            if hot.stop or time.time() - t0 > self.cfg.max_time_sec or rmse < self.cfg.loss_tol_sqrt:
+            if epoch % 500 == 0: model.save(out_dir / "model.keras")
+            if hot.q or time.time() - t0 > cfg.max_time_sec or rmse < cfg.loss_tol_sqrt:
                 print(f"Termination either by user, tolerance, or max time")
                 break
             epoch += 1
 
-        self.model.save(out_dir / "model.keras")
-        return self.model
+        model.save(out_dir / "model.keras")
+        return model
 
-    def chart(self, lam, t, x=None, show=True, filename='F'):
+    def chart(self, t, x=None, show_chart=True):
         N, cushion_y = 10001, 0.05
         if x is None:
             x = np.array([-0.3, -0.1, 0, 0.1, 0.2, 0.3])
@@ -204,7 +196,8 @@ class DistributionTrainer:
 
         mums = family(self.sampler_cfg, self.universe, txy={'t': _t, 'x': _x, 'y': _y})
         families = expand_family(mums, self.universe)
-        res_fn = self.residuals_fn(families, lam, detailed=True, full_batch=True)
+        self._batch = None
+        res_fn = self.residuals_fn(families, detailed=True)
         e, F, Y = res_fn()
         e = e.numpy().reshape(t.size, x.size, y.size)
         F = F.numpy().reshape(t.size, x.size, y.size)
@@ -248,11 +241,11 @@ class DistributionTrainer:
         fig.legend(*zip(*unique), ncol=len(unique), loc='upper center', fontsize='x-small')
         fig.tight_layout()
 
-        #if not show:
-        #    file = util.paper_folder + '/' + filename + ".pdf"
-        #    if os.path.isfile(file):
-        #        os.remove(file)
-        #    plt.savefig(file, format='pdf', dpi=600)
-        #    plt.close()
-        #else:
-        plt.show()
+        if not show_chart:
+            out_dir = Path(self.train_cfg.model_dir)
+            chart_path = out_dir / self.train_cfg.chart_pdf
+            if os.path.isfile(chart_path): os.remove(chart_path)
+            plt.savefig(chart_path, format='pdf', dpi=600)
+            plt.close()
+        else:
+            plt.show()

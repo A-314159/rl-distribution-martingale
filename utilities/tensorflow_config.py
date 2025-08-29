@@ -32,6 +32,8 @@ _REDUCE_RETRACING = True
 _JIT_DEFAULT = False
 _PRECISION = "float32"
 _DATASET_DETERMINISTIC = True
+LOW = None
+HIGH = None
 
 
 # ---------- Public API ----------
@@ -74,7 +76,7 @@ def configure(*,
     :return:
     """
 
-    global _REDUCE_RETRACING, _JIT_DEFAULT, _PRECISION, _DATASET_DETERMINISTIC
+    global _REDUCE_RETRACING, _JIT_DEFAULT, _PRECISION, _DATASET_DETERMINISTIC, LOW, HIGH
     _REDUCE_RETRACING = reduce_retracing
     _JIT_DEFAULT = bool(jit_compile) or (mode == "graph_xla")
     _PRECISION = precision
@@ -98,9 +100,10 @@ def configure(*,
 
     # ---- Import TF AFTER env flags ----
     import tensorflow as tf
+    from tensorflow.keras import mixed_precision as mp
 
     # GPU visibility
-    _use_gpu_internal(use_gpu)
+    using_gpu = _use_gpu_internal(use_gpu)
 
     # Execution mode
     set_tf_mode(mode)
@@ -111,10 +114,15 @@ def configure(*,
     elif precision == "float32":
         tf.keras.backend.set_floatx("float32")
     elif precision == "mixed16":
-        from tensorflow.keras import mixed_precision
-        mixed_precision.set_global_policy("mixed_float16")
+        if using_gpu:
+            from tensorflow.keras import mixed_precision
+            mixed_precision.set_global_policy("mixed_float16")
+        else: tf.keras.backend.set_floatx("float32")
     else:
         raise ValueError("precision must be 'float32', 'float64', or 'mixed16'")
+
+    pol = mp.global_policy()
+    LOW, HIGH = tf.as_dtype(pol.compute_dtype), tf.as_dtype(pol.variable_dtype)
 
     # CPU threading
     if num_threads_CPU is not None:
@@ -237,30 +245,30 @@ def tf_compile(fn=None, *, reduce_retracing=None, jit=None):
 
 # ---------- Helpers ----------
 
-def _use_gpu_internal(use_gpu: bool):
+def _use_gpu_internal(gpu_index: int = -1):
     """
     Configure visible GPU(s). Call only once, before any tensors/models are created.
+    :param gpu_index: -1 to use CPU, index of GPU otherwise
+    :return: True if using GPU, False otherwise
     """
+
     import tensorflow as tf
 
-    if use_gpu is False:
+    if gpu_index==-1:
         # Hide all GPUs → force CPU
         tf.config.set_visible_devices([], "GPU")
         print("Forcing CPU only (no GPUs visible).")
-        return
-
-    # Determine which GPU index to use
-    gpu_index = 0 if use_gpu is True else int(use_gpu)
+        return False
 
     gpus = tf.config.list_physical_devices("GPU")
     if not gpus:
         print("No GPU found; running on CPU.")
-        return
+        return False
 
     if gpu_index < 0 or gpu_index >= len(gpus):
         print(f"Requested GPU index {gpu_index} not available; using CPU.")
         tf.config.set_visible_devices([], "GPU")
-        return
+        return False
 
     try:
         tf.config.set_visible_devices(gpus[gpu_index], "GPU")
@@ -270,6 +278,7 @@ def _use_gpu_internal(use_gpu: bool):
         # Happens if called after GPUs already initialized
         print("GPU config error (likely called too late):", e)
 
+    return True
 
 # ------------------------------------------------------------------------
 # Check configuration

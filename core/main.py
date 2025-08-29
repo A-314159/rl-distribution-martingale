@@ -12,11 +12,11 @@ def main():
     folder = secrets.token_urlsafe(16)  # this is to be used to assign a folder name as an experiment token
     folder = "F BS"
     u = UniverseBS(sigma=0.3, T=0.5, P=60, K=1.0)
-    s = SamplerConfig(N=2 ** 14, x0=0.0, a=0.3, b=4.0, c=1 / 52, r0=0.02, r1=0.002)
-    c = TrainConfig(optimizer="adam", lr=1e-3,
+    s = SamplerConfig(N=2 ** 14, x0=0.0, a=0.5, b=4.0, c=1 / 52, r0=0.02, r1=0.002)
+    c = TrainConfig(optimizer="lm", lr=1e-3,
                     batch_size=512, max_epochs=10000, max_time_sec=3600, loss_tol_sqrt=1e-4,
                     model_dir='experiment/'+folder, eval_pairs=[(0, 0.0), (20, 0.0), (40, 0.0)],
-                    mc_paths=10000, full_batch=True)
+                    mc_paths=10000, full_batch=True, show_chart=True)
     a = BSDeltaHedge()
     trainer = DistributionTrainer(u, s, c, a)
     trainer.build()
