@@ -46,7 +46,6 @@ def configure(*,
               jit_compile: bool = False,
               log_level: str = "2",
               precision: str = "float64",  # "float32" | "float64" | "mixed16"
-              num_threads_CPU: int = None,
               deterministic_ops: bool = True,
               deterministic_shuffling: bool = True,
               seed: int = 0,
@@ -68,7 +67,6 @@ def configure(*,
     :param jit_compile: True (faster)
     :param log_level:
     :param precision: "float32" | "float64" | "mixed16"
-    :param num_threads_CPU: integer to limit the number of threads  (for better speed) if running on CPU
     :param deterministic_ops: True (slower) for reproducibility (debug, publications) to prevent non-deterministic GPU kernels (e.g. atomic adds)
     :param deterministic_shuffling: False is better (True if reproducibility is needed, or while debuggin)
     :param seed: int (-1 for no seed) (Set the seed for numpy, tensorflow and random)
@@ -125,32 +123,29 @@ def configure(*,
     pol = mp.global_policy()
     LOW, HIGH, SENSITIVE_CALC = tf.as_dtype(pol.compute_dtype), tf.as_dtype(pol.variable_dtype), tf.float64
 
-    # CPU threading
-    if num_threads_CPU is not None:
-        # Logical cores (includes hyper threading)
-        logical = psutil.cpu_count(logical=True)
-        # Physical cores (excludes hyper threading)
-        physical = psutil.cpu_count(logical=False)
+    # Set the CPU threading (this is otherwise chosen by tensorflow automatically)
+    logical = psutil.cpu_count(logical=True)
+    physical = psutil.cpu_count(logical=False)
 
-        """ From ChatGPT:
-        Definitions:
-            intra_op_parallelism_threads: threads within one op (e.g., how many threads a big matmul uses).
-            inter_op_parallelism_threads: how many independent ops can run concurrently.
+    """ From ChatGPT:
+    Definitions:
+        intra_op_parallelism_threads: threads within one op (e.g., how many threads a big matmul uses).
+        inter_op_parallelism_threads: how many independent ops can run concurrently.
 
-        Why inter_op = 1 is often best:
-            Training steps are usually dominated by a few big kernels (GEMMs/convolutions). Running multiple big ops at once causes thread oversubscription, cache thrash, and context switching on the same cores.
-            So you let one big op fully use the CPU (via intra_op), instead of several fighting each other (via inter_op).
+    Why inter_op = 1 is often best:
+        Training steps are usually dominated by a few big kernels (GEMMs/convolutions). Running multiple big ops at once causes thread oversubscription, cache thrash, and context switching on the same cores.
+        So you let one big op fully use the CPU (via intra_op), instead of several fighting each other (via inter_op).
 
-        Heuristics (start here and tweak):
-            If your step is dominated by one or a few large ops (typical for a single full-batch dense model):
-            inter_op = 1
-            intra_op ≈ number of physical cores (sometimes up to logical threads is OK)
+    Heuristics (start here and tweak):
+        If your step is dominated by one or a few large ops (typical for a single full-batch dense model):
+        inter_op = 1
+        intra_op ≈ number of physical cores (sometimes up to logical threads is OK)
 
-        If your graph truly has many independent medium ops that don’t saturate cores, you can try inter_op = 2.
-        """
+    If your graph truly has many independent medium ops that don’t saturate cores, you can try inter_op = 2.
+    """
 
-        tf.config.threading.set_intra_op_parallelism_threads(physical) # ChatGPT suggests: between physical and logical
-        tf.config.threading.set_inter_op_parallelism_threads(1)  # ChatGPT: 1 or 2
+    tf.config.threading.set_intra_op_parallelism_threads(physical) # ChatGPT suggests: between physical and logical
+    tf.config.threading.set_inter_op_parallelism_threads(1)  # ChatGPT: 1 or 2
 
     # Seeds
     if seed != -1:

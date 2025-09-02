@@ -1,5 +1,6 @@
 # --------------------------------------------------------------------------
-# EAGER version
+# 'eager' version w/out graph and @tf_function
+# c.f. explanations in https://chatgpt.com/share/68b47ba4-69e0-800a-891a-56aba89e89fd
 # --------------------------------------------------------------------------
 """
 TensorFlow L-BFGS(D) optimizer with:
@@ -13,6 +14,13 @@ TensorFlow L-BFGS(D) optimizer with:
     Author: ChatGPT
 
 """
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Tuple, Any
+import tensorflow as tf
+import time, math
+from utilities.tensorflow_config import tf_compile
+
 """
 If a method is decorated by @tf_function with the intent to run it as graph, 
 applying tf.config.run_functions_eagerly(True) forces to run the method eagerly.
@@ -38,13 +46,6 @@ This can slow down training on GPU by a factor of 10 to 100.
 Conclusion: for debugging: use this version. for training: use the graph version of lbfgs_graph.py
 
 """
-
-from __future__ import annotations
-from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple, Any
-import tensorflow as tf
-import time, math
-from utilities.tensorflow_config import tf_compile
 
 
 def dot(a: tf.Tensor, b: tf.Tensor) -> tf.Tensor:
