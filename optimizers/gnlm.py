@@ -2,13 +2,9 @@ from abc import ABC
 
 import tensorflow as tf
 from utilities.tensorflow_config import tf_compile
-from utilities.misc import unpack_like, pack
+from optimizers.packing import unpack_like, pack, add
 
 
-@tf_compile
-def apply_delta(vars_list, delta_flat):
-    for v, d in zip(vars_list, unpack_like(delta_flat, vars_list)):
-        v.assign_add(d)
 
 
 # Your residuals function (batched). Return a *flat* tensor.
@@ -87,7 +83,7 @@ class GaussNewtonLM(tf.keras.optimizers.Optimizer, ABC):
 
         # Solve for delta with CG and apply
         delta = self._cg(matvec, b)
-        apply_delta(var_list, delta)
+        add(var_list, delta)
         return loss, tf.norm(g_flat), tf.norm(delta)
 
 

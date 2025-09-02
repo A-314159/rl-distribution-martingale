@@ -71,11 +71,11 @@ class LBFGS:
 
     # ---- TF loss/grad on the CURRENT theta (weights set before call) ----
 
-    @tf.function
-    def _loss_and_grad(self, error_closure, variables) -> Tuple[tf.Tensor, tf.Tensor]:
+    @tf_compile
+    def _loss_and_grad(self, f, variables) -> Tuple[tf.Tensor, tf.Tensor]:
         with tf.GradientTape() as tape:
             # Tape watches variables automatically
-            residuals = error_closure()
+            residuals = f()
             loss = _to_scalar_loss(residuals)
         grads = tape.gradient(loss, variables)
         # Replace None grads (e.g., frozen vars) with zeros to keep shapes consistent

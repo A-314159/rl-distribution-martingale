@@ -83,17 +83,3 @@ def to_csv(csv_path, mode, data):
         csv.writer(f).writerow(data)
 
 
-@tf_compile
-def pack(vars_list):
-    return tf.concat([tf.reshape(v, [-1]) for v in vars_list], axis=0)
-
-
-@tf_compile
-def unpack_like(vec, vars_like):
-    parts, offset = [], 0
-    for v in vars_like:
-        size = tf.size(v)
-        part = tf.reshape(vec[offset: offset + size], tf.shape(v))
-        parts.append(part)
-        offset += size
-    return parts

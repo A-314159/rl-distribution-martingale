@@ -1,4 +1,4 @@
-import os, subprocess, sys, textwrap
+import os, subprocess, sys, textwrap, psutil
 
 # ------------------------------------------------------------------------
 # Configure tensorflow
@@ -127,8 +127,30 @@ def configure(*,
 
     # CPU threading
     if num_threads_CPU is not None:
-        tf.config.threading.set_intra_op_parallelism_threads(num_threads_CPU)
-        tf.config.threading.set_inter_op_parallelism_threads(num_threads_CPU)
+        # Logical cores (includes hyper threading)
+        logical = psutil.cpu_count(logical=True)
+        # Physical cores (excludes hyper threading)
+        physical = psutil.cpu_count(logical=False)
+
+        """ From ChatGPT:
+        Definitions:
+            intra_op_parallelism_threads: threads within one op (e.g., how many threads a big matmul uses).
+            inter_op_parallelism_threads: how many independent ops can run concurrently.
+
+        Why inter_op = 1 is often best:
+            Training steps are usually dominated by a few big kernels (GEMMs/convolutions). Running multiple big ops at once causes thread oversubscription, cache thrash, and context switching on the same cores.
+            So you let one big op fully use the CPU (via intra_op), instead of several fighting each other (via inter_op).
+
+        Heuristics (start here and tweak):
+            If your step is dominated by one or a few large ops (typical for a single full-batch dense model):
+            inter_op = 1
+            intra_op ≈ number of physical cores (sometimes up to logical threads is OK)
+
+        If your graph truly has many independent medium ops that don’t saturate cores, you can try inter_op = 2.
+        """
+
+        tf.config.threading.set_intra_op_parallelism_threads(physical) # ChatGPT suggests: between physical and logical
+        tf.config.threading.set_inter_op_parallelism_threads(1)  # ChatGPT: 1 or 2
 
     # Seeds
     if seed != -1:
@@ -202,12 +224,35 @@ def print_tf_summary(seed_used: int = -1):
 
     seed_used_str = f"{seed_used}" if seed_used != 1 else "None"
 
+    inter_op = tf.config.threading.get_inter_op_parallelism_threads()
+    intra_op = tf.config.threading.get_intra_op_parallelism_threads()
+
     print(
         f"[TF] py={py_ver} tf={tf_ver} | policy={policy_str} | "
-        f"GPUs={gpu_info} | oneDNN={one_dnn} | exec={exec_mode} "
+        f"GPUs={gpu_info} | oneDNN={one_dnn} | CPU (inter/intra op)=({inter_op},{intra_op}) | exec={exec_mode} "
         f"(eager_flag={run_eager_flag}) | XLA={xla_jit} | "
         f"det_ops={det_ops} | TF32_OVR={tf32_ovr or 'unset'} | seed={seed_used_str}"
     )
+
+"""
+If a method is decorated by @tf_function with the intent to run it as graph, 
+applying tf.config.run_functions_eagerly(True) forces to run the method eagerly.
+
+If a method is not decorated by @tf_function, it will run eagerly whether or not  we aplly
+tf.config.run_functions_eagerly(False)
+
+Methods that compute tensors but use python-style controls (e.g. if x>0) 
+can not work as graph because the condition is only traced at decoration time, and not executed at runtime.
+The condition wont depend on the actual value during execution.
+Therefore, it is important to not decorate them with @tf_function.
+Python-style controls break automatic differentiation and should only be used when there is no need for it.
+
+Here, the cost of setting LBFGS direction and of line search is small 
+compared with the computation of the function f and its gradient, 
+therefore it is better to not decorate them as graph (and de facto run them eagerly), 
+so as to keep controls (on curvature or else) in plain python-style. 
+"""
+
 
 
 def set_tf_mode(mode: str):
@@ -223,7 +268,7 @@ def set_tf_mode(mode: str):
         except Exception:
             pass
     else:
-        tf.config.run_functions_eagerly(True)
+        tf.config.run_functions_eagerly(False)
 
 
 def tf_compile(fn=None, *, reduce_retracing=None, jit=None):

@@ -1,28 +1,27 @@
-import math
-import numpy as np
 import tensorflow as tf
+import numpy as np
+from utilities.tensorflow_config import tf_compile, HIGH, LOW, SENSITIVE_CALC
+import math
 from scipy.optimize import minimize_scalar as min1
-from utilities.tensorflow_config import tf_compile
 from utilities.misc import set_attributes
-from optimizers.convergence_flag import CvgFlags
+from optimizers.convergence_flag import CvgFlags, converged, tolerance
 
 
+@tf_compile
 def canonical_vector(dim):
     u = np.zeros(dim)
     u[0] = 1
-    return tf.constant(u, dtype=tf.keras.backend.floatx())
+    return tf.constant(u, dtype=HIGH)
 
 
+@tf_compile
 def sign(x):
-    return tf.constant(1.0 if x > 0 else -1.0, dtype=tf.keras.backend.floatx())
+    return 1.0 if x > 0 else -1.0
 
 
-dtype = tf.keras.backend.floatx()
-
-
-class BFGSM():
+class LBFGSM:
     def __init__(self, params=None,
-                 x=None, model=None, f=None,
+                 x_list=None, f=None,
                  memory: int = 15,
                  tolerance_loss=1e-12, tolerance_x=1e-32, tolerance_gradient=1e-20,
                  line_search_c1=1e-4, line_search_c2=0.9,  # line_search_c1=1e-4, line_search_c2=0.9,
@@ -44,10 +43,11 @@ class BFGSM():
         :param line_search_c2: Wolfe condition for the line search algorithm
         :param maximum_line_iteration: maximum iteration for the line search algorithm
         """
-        super(BFGSM, self).__init__()
+        super(LBFGSM, self).__init__()
 
         # Set values passed as arguments or default values
-        self.x, self.model, self.f, self.memory = x, model, f, memory
+        x = tf.dynamic_stitch(f.idx, x_list)
+        self.x, self.f, self.memory = x, f, memory
         self.tolerance_loss, self.tolerance_gradient = tolerance_loss, tolerance_gradient  # tolerance on loss and grad
         self.tolerance_x = tolerance_x  # tolerance on the change of the solution
         self.line_search_c1, self.line_search_c2 = line_search_c1, line_search_c2
@@ -62,48 +62,31 @@ class BFGSM():
 
         if mascia: self.wolfe = False
 
+        self.m = self.m_offset = self.loss = self.angle = 0
+        self.dim = int(tf.size(x).numpy())
         # todo: change the code to allow for longer memory, in the meantime, we cap it
-        self.memory = min(int(tf.size(self.x).numpy()), self.memory)
+        self.memory = min(self.dim, self.memory)
 
-        self.m = 0
-        self.m_offset = 0
-        self.dim = tf.size(util.tf_flatten(model.nn.trainable_variables)).numpy()
+        self.g = self.g_norm = self.d = self.d_norm = self.s = self.y = None
+        self.prior_x = self.prior_g = self.prior_d = self.prior_d_norm = None
+        self.sTs = self.yTy = self.sTy = self.sTg = self.yTg = None
+        self.positive_curvature, self.tiny_curvature, self.neg_curvature = True, False, False
+        self.__status = CvgFlags.initialized
 
-        self.loss = 0  # loss at x
-
-        self.g = None  # gradient of loss at x
-        self.g_norm = None
-
-        self.d = None  # search direction
-        self.d_norm = None
-
-        self.prior_x = None
-        self.prior_g = None
-        self.prior_d = None
-        self.prior_d_norm = None
-        self.angle = 0
-        self.positive_curvature = True
-        self.tiny_curvature = False
-        self.__status = util.CvgFlags.initialized
-
-        self.sTs = None
-        self.yTy = None
-        self.sTy = None
-        self.sTg = None
-        self.yTg = None
-
-        self.s = []  # change of x between two iterations
-        self.y = []  # change of the gradient between two iterations
-        for m in range(self.memory):
-            self.s.append(tf.zeros(self.dim, dtype=util.dtype))
-            self.y.append(tf.zeros(self.dim, dtype=util.dtype))
-        self.alpha = np.zeros(self.dim)
-        self.rho = np.zeros(self.dim)
+        self.reset_sy()
+        self.alpha, self.rho = tf.zeros_like(self.x), tf.zeros_like(self.x)
         self.canonical_vector = canonical_vector(self.dim)  # vector (1,0,..., 0)
-        self.neg_curvature = False
+
         self.x = None  # vector x
         self.g, self.loss = self.derivatives(x=x, derivative_order=1)
         self.g_descent(x, learning_rate=1e-12)  # Initialize with a simple gradient descent
+
+    def reset_sy(self):
+        self.s = []  # change of x between two iterations
+        self.y = []  # change of the gradient between two iterations
+        for m in range(self.memory):
+            self.s.append(tf.zeros_like(self.x))
+            self.y.append(tf.zeros_like(self.x))
 
     @property
     def sqrt_loss(self):
@@ -134,10 +117,11 @@ class BFGSM():
 
     @property
     def converged(self):
-        return self.__status in util.converged
+        return self.__status in converged
 
+    @tf_compile
     def derivatives(self, x, derivative_order: int = 0):
-        l, g = self.f(x)
+        g, l = self.f(x)
         if derivative_order == 0:
             return l
         else:
@@ -145,6 +129,7 @@ class BFGSM():
                 raise Exception('gradient is nan in BFGS derivatives')
             return g, l
 
+    @tf_compile
     def reset(self, memory=None):
         self.x = None
         self.m = 0
@@ -154,25 +139,17 @@ class BFGSM():
             self.y = []  # change of the gradient between two iterations
             self.memory = memory
             for m in range(memory):
-                self.s.append(tf.zeros(self.dim, dtype=util.dtype))
-                self.y.append(tf.zeros(self.dim, dtype=util.dtype))
+                self.s.append(tf.zeros_like(self.x))
+                self.y.append(tf.zeros_like(self.x))
 
+    @tf_compile
     def update(self, x, l, g, d):
         if g is None:
             g, l = self.derivatives(x=x, derivative_order=1)
 
-        self.prior_x = self.x
-        self.prior_g = self.g
-        self.prior_d = self.d
-        self.prior_d_norm = self.d_norm
-
-        self.x = x
-        self.loss = l
-        self.g = g
-        self.d = d
-
-        self.g_norm = tf.norm(g)
-        self.d_norm = tf.norm(d)
+        self.prior_x, self.prior_g, self.prior_d, self.prior_d_norm = self.x, self.g, self.d, self.d_norm
+        self.x, self.loss, self.g, self.d = x, l, g, d
+        self.g_norm, self.d_norm = tf.norm(g), tf.norm(d)
         cosine = (tf.tensordot(self.d, self.prior_d, 1) / self.d_norm / self.prior_d_norm).numpy()
 
         if cosine > 1:
@@ -183,7 +160,8 @@ class BFGSM():
             self.angle = math.acos(cosine)
         self.set_s_y()
 
-    def g_descent(self, x, learning_rate=1e-6, status=util.CvgFlags.g_descent__):
+    @tf_compile
+    def g_descent(self, x, learning_rate=1e-6, status=CvgFlags.g_descent__):
         self.x = x
         self.d = -self.g
         self.d_norm = self.d_norm = tf.norm(self.d)
@@ -192,11 +170,11 @@ class BFGSM():
             if g is None:
                 print('Gradient is None')
                 g = tf.zeros_like(x)
-                status = util.CvgFlags.none_grad__
+                status = CvgFlags.none_grad__
             self.d = -g
         if x is None:
             print('x is None in gd')
-            return util.CvgFlags.x_is_none__
+            return CvgFlags.x_is_none__
         _x = self.x + learning_rate * self.d
         _g, _loss = self.derivatives(_x, derivative_order=1)
         self.update(_x, _loss, _g, self.d)
@@ -207,6 +185,7 @@ class BFGSM():
     def index(self):
         return (self.m + self.m_offset) % self.memory
 
+    @tf_compile
     def s_y_dot(self):
         index = self.index()
         s = self.s[index]
@@ -216,12 +195,14 @@ class BFGSM():
         self.sTy = tf.tensordot(s, y, 1)
         return
 
+    @tf_compile
     def set_s_y(self):
         index = self.index()
         self.s[index] = self.x - self.prior_x
         self.y[index] = self.g - self.prior_g
         self.s_y_dot()
 
+    @tf_compile
     def copy_prior_s_y(self):
         if self.m == 0:
             raise Exception("Tiny curvature for m=0. The code does not handle this case.")
@@ -231,6 +212,7 @@ class BFGSM():
         self.y[index] = self.y[prior_index]
         self.s_y_dot()
 
+    @tf_compile
     def curvature(self):
 
         sTy_floor = math.sqrt(1e-16 * self.sTs * self.yTy)
@@ -255,34 +237,26 @@ class BFGSM():
                 "Curvature condition not satisfied despite applying Wolfe condition. Need to apply damping or copying")
         return curvature_condition, tiny_sTy
 
-    def gd(self):
-        # warning very weird: we need to use a very large lr, otherwise extremely slow. With 10 it is fast but errors goes up sometimes,
-        #  with 100, it converges to a null distribution immediatley with 0 gradient
-        self.g_descent(self.x, learning_rate=1e-3, status=util.CvgFlags.g_descent__)
-        return util.CvgFlags.g_descent__
-
-    def __call__(self):
+    @tf_compile
+    def minimize(self):
         """
         update the vector x
         :return:    convergence status
         """
-        if self.force_gd:
-            return self.gd()
-
         if self.loss < self.tolerance_loss:
-            self.__status = util.CvgFlags.loss_tol___
-            return util.CvgFlags.loss_tol___
+            self.__status = CvgFlags.loss_tol___
+            return CvgFlags.loss_tol___
 
         if math.sqrt(self.sTs) < self.tolerance_x:
-            self.__status = util.CvgFlags.x_chg_tol__
+            self.__status = CvgFlags.x_chg_tol__
             self.line_search_c1 = 1e-6
             self.reset(memory=10)
-            self._status = self.g_descent(self.x, learning_rate=1e-5, status=util.CvgFlags.x_chg_tol__)
+            self._status = self.g_descent(self.x, learning_rate=1e-5, status=CvgFlags.x_chg_tol__)
             return self._status
 
         if self.g_norm < self.tolerance_gradient:
-            self.__status = util.CvgFlags.grad_tol___
-            return util.CvgFlags.grad_tol___
+            self.__status = CvgFlags.grad_tol___
+            return CvgFlags.grad_tol___
 
         positive_curvature, tiny_curvature = self.curvature()
         if tiny_curvature: self.copy_prior_s_y()  # Set a and y as prior s and y (not recommended by Nocedal)
@@ -310,18 +284,18 @@ class BFGSM():
             _x = self.x + m.x * _d
             # _g = None # july 2025
             _g, _loss = self.derivatives(x=_x, derivative_order=1)  # july 2025
-            self.__status = util.CvgFlags.line_min___
+            self.__status = CvgFlags.line_min___
         else:
             n = tf.norm(_d)
 
             _g, _loss, _x, self.__status = self.line_search(d=_d, p=_p, curvilinear=_curvilinear,
                                                             eigenvalue=_min_eigenvalue)
 
-        if self.__status == util.CvgFlags.pos_slope__ or self.__status == util.CvgFlags.x_stationar:
+        if self.__status == CvgFlags.pos_slope__ or self.__status == CvgFlags.x_stationar:
             # This should not happen. We perform a simple gradient descent as a poor idea
             # We raise an exception anyhow to force debugging and find better idea
             #raise Exception('Positive slope in bfgsm')
-            if self.__status == util.CvgFlags.pos_slope__: print('Positive slope')
+            if self.__status == CvgFlags.pos_slope__: print('Positive slope')
             #self.line_search_c1 = 1e-6
             x = self.x
             self.reset(memory=10)
@@ -329,6 +303,7 @@ class BFGSM():
             self.__status = self.g_descent(x, learning_rate=1e-5, status=self.__status)
         self.update(_x, _loss, _g, _d)
 
+    @tf_compile
     def curvilinear_direction(self):
         """
         Implementation of "A memoryless BFGS neural network training algorithm"
@@ -373,8 +348,10 @@ class BFGSM():
                 d = -sign(tf.tensordot(u1, self.g, 1)) * u1 / tf.norm(u1)
             self.m_offset = self.m_offset + self.m
             self.m = 1
+
             return d, p, True, lambda1
 
+    @tf_compile
     def lbfgs_direction(self):
         """
         Classical limited memory BFGS
@@ -398,6 +375,7 @@ class BFGSM():
         self.m = self.m + 1
         return d
 
+    @tf_compile
     def line_search(self, d, p=None, step_max=1, curvilinear=False, eigenvalue=0):
         """
         Implementation and adaptation of the search of Numerical Recipes in C, chapter 9.7.
@@ -423,7 +401,7 @@ class BFGSM():
 
         slope = tf.tensordot(self.g, d, 1)  # slope at lambda=0 (the same whether linear or curvilinear)
         if slope >= 0:
-            return None, self.loss, self.x, util.CvgFlags.pos_slope__
+            return None, self.loss, self.x, CvgFlags.pos_slope__
 
         abs_x = tf.math.abs(self.x)
         max_ratio = tf.reduce_max(tf.math.abs(d) / tf.where(abs_x < 1, 1, abs_x))
@@ -447,10 +425,10 @@ class BFGSM():
             g = None
             if alam < alamin:
                 if f > f0:
-                    return g, f, new_x, util.CvgFlags.pos_slope__
+                    return g, f, new_x, CvgFlags.pos_slope__
                 else:
                     # print(max_ratio)
-                    return g, f, new_x, util.CvgFlags.x_stationar
+                    return g, f, new_x, CvgFlags.x_stationar
             if not math.isnan(f):
                 if f < f0 + self.line_search_c1 * alam * (slope + 0.5 * eigenvalue):  # Armijo condition
                     stop = True
@@ -461,11 +439,11 @@ class BFGSM():
                             stop = False
                     if stop:
                         if alam == 1:
-                            return g, f, new_x, util.CvgFlags.full_newton
+                            return g, f, new_x, CvgFlags.full_newton
                         else:
-                            return g, f, new_x, util.CvgFlags.suff_dec___
+                            return g, f, new_x, CvgFlags.suff_dec___
                 if i == self.maximum_line_iteration - 1:
-                    return g, f, new_x, util.CvgFlags.src_maxiter
+                    return g, f, new_x, CvgFlags.src_maxiter
                 if alam == 1:
                     tmplam = -slope / 2 / (f - f0 - slope)
                 else:
