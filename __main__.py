@@ -11,12 +11,16 @@ if __name__ == "__main__":
     #
     # Optional, it does not need to be run each time. (Only when the code needs to be checked)
     # ----------------------------------------------------
-    scan=True
+    scan = True
     if os.environ.get("TRAIN_SKIP_SCAN") == "0" or scan:
         print("🔍 Running TensorFlow static scanner...")
         issues = run_scan(
             paths=["core", "utilities", "optimizers"],
             excludes=["**/__main__.py", "**/scan_tf_graph_readiness.py"],
+            scan_graph=True,  # scan for compatibility with graph and autodiff
+            scan_broadcast=False,  # scan for potential issues of broadcasting: typically (N,) versus (N,1)
+            max_call_depth=5,
+            disable_rules=None,  # List of rules to be disabled during scanning, e.g. ["print_in_compiled"],
             return_format="json",
             json_file="scan_report.json",
             extra_decorators=["tf_compile"],

@@ -15,7 +15,7 @@ e) Try the agent mode of chat gpt (later)
 f) Try the cloud computing
 g) Build a word document to summarize what I did to create the repo, commit, push, how to use github, use the agent, use cloud computing via github
 h) Continue reviewing my paper
-i) Once GPU is ready:
+i) Once GPU is ready: (maybe try: https://www.crazywebstudio.co.th/blog/how-to-solve-code-43-nvidia-gtx10xx-or-rtx20xx-gpu-problem/)
     i-1) Refactor the train method into a tf_function (otherwise perf loss 10x-100x)
     i-2) Test the tailored lbfgs graph (otherwise perf loss 10x-100x)
 j) Merge with my prior work on martingale

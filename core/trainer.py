@@ -16,6 +16,7 @@ from optimizers.gnlm import GaussNewtonLM
 from optimizers.optimizer import Optimizer
 
 from utilities.tensorflow_config import tf_compile, LOW, HIGH, SENSITIVE_CALC
+from utilities.decorators import requires_grad, no_grad_ok
 from utilities.misc import HotKeys, to_csv, jsonable
 import matplotlib.pyplot as plt
 from itertools import product
@@ -69,6 +70,7 @@ class DistributionTrainer:
             return tuple(values)
 
         @tf_compile
+        @requires_grad
         def details() -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
             t, sqrt_tau, x, x_lo, x_hi, y, y_lo, y_hi, t_c, sqrt_tau_c, x_c, w_c, term, dS, pv_c, Y_hint = gather()
 

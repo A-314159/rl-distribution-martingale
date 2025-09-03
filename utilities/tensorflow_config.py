@@ -36,6 +36,7 @@ LOW = 0
 HIGH = 0
 SENSITIVE_CALC = 0
 
+
 # ---------- Public API ----------
 
 def configure(*,
@@ -80,7 +81,6 @@ def configure(*,
     _PRECISION = precision
     _DATASET_DETERMINISTIC = deterministic_shuffling
 
-
     if "tensorflow" in sys.modules:
         raise RuntimeError("configure() must run before importing TensorFlow")
 
@@ -116,7 +116,8 @@ def configure(*,
         if using_gpu:
             from tensorflow.keras import mixed_precision
             mixed_precision.set_global_policy("mixed_float16")
-        else: tf.keras.backend.set_floatx("float32")
+        else:
+            tf.keras.backend.set_floatx("float32")
     else:
         raise ValueError("precision must be 'float32', 'float64', or 'mixed16'")
 
@@ -144,7 +145,7 @@ def configure(*,
     If your graph truly has many independent medium ops that don’t saturate cores, you can try inter_op = 2.
     """
 
-    tf.config.threading.set_intra_op_parallelism_threads(physical) # ChatGPT suggests: between physical and logical
+    tf.config.threading.set_intra_op_parallelism_threads(physical)  # ChatGPT suggests: between physical and logical
     tf.config.threading.set_inter_op_parallelism_threads(1)  # ChatGPT: 1 or 2
 
     # Seeds
@@ -229,6 +230,7 @@ def print_tf_summary(seed_used: int = -1):
         f"det_ops={det_ops} | TF32_OVR={tf32_ovr or 'unset'} | seed={seed_used_str}"
     )
 
+
 """
 If a method is decorated by @tf_function with the intent to run it as graph, 
 applying tf.config.run_functions_eagerly(True) forces to run the method eagerly.
@@ -247,7 +249,6 @@ compared with the computation of the function f and its gradient,
 therefore it is better to not decorate them as graph (and de facto run them eagerly), 
 so as to keep controls (on curvature or else) in plain python-style. 
 """
-
 
 
 def set_tf_mode(mode: str):
@@ -295,7 +296,7 @@ def _use_gpu_internal(gpu_index: int = -1):
 
     import tensorflow as tf
 
-    if gpu_index==-1:
+    if gpu_index == -1:
         # Hide all GPUs → force CPU
         tf.config.set_visible_devices([], "GPU")
         print("Forcing CPU only (no GPUs visible).")
@@ -320,6 +321,7 @@ def _use_gpu_internal(gpu_index: int = -1):
         print("GPU config error (likely called too late):", e)
 
     return True
+
 
 # ------------------------------------------------------------------------
 # Check configuration

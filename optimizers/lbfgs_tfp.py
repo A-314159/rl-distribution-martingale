@@ -14,7 +14,7 @@ def _to_scalar_loss(residuals: tf.Tensor) -> tf.Tensor:
     return 0.5 * tf.reduce_mean(tf.square(residuals))
 
 
-class LBFGS:
+class LBFGS_TFP:
     """
     Full-batch L-BFGS driver using TensorFlow Probability.
     Usage:

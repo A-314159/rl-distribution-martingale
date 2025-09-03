@@ -1,3 +1,11 @@
+# -----------------------------------------------------------------------------
+# Old custom implementation of LBFGS with -y with curvature condition is not met.
+# -----------------------------------------------------------------------------
+# warning: it was supposed to be run with a specific function factory method
+#  It works well (in fp64 only, unstable in fp32) but is not yet fully integrated here.
+# -----------------------------------------------------------------------------
+# warning: not using graphs (even if the loss function is), hence not optimal on GPU
+# -----------------------------------------------------------------------------
 import tensorflow as tf
 import numpy as np
 from utilities.tensorflow_config import tf_compile, HIGH, LOW, SENSITIVE_CALC
@@ -19,7 +27,7 @@ def sign(x):
     return 1.0 if x > 0 else -1.0
 
 
-class LBFGSM:
+class LBFGS_M:
     def __init__(self, params=None,
                  x_list=None, f=None,
                  memory: int = 15,
@@ -43,7 +51,7 @@ class LBFGSM:
         :param line_search_c2: Wolfe condition for the line search algorithm
         :param maximum_line_iteration: maximum iteration for the line search algorithm
         """
-        super(LBFGSM, self).__init__()
+        super(LBFGS_M, self).__init__()
 
         # Set values passed as arguments or default values
         x = tf.dynamic_stitch(f.idx, x_list)

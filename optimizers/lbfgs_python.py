@@ -166,7 +166,7 @@ class HagerZhang(LineSearchBase):
 
 @dataclass
 class LBFGSConfig:
-    m: int = 20
+    m: int = 15
     line_search: str = 'nonmonotone_armijo'
     armijo_c1: float = 1e-4
     armijo_window: int = 5
@@ -185,7 +185,7 @@ class LBFGSConfig:
     verbose: bool = False
 
 
-class LBFGS:
+class LBFGS_PYTHON:
     def __init__(self, **kwargs):
         self.cfg = LBFGSConfig(**kwargs)
         if self.cfg.line_search == 'nonmonotone_armijo':

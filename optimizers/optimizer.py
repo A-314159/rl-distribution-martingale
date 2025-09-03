@@ -2,8 +2,9 @@ import tensorflow as tf
 import numpy as np
 from tensorflow import keras
 from optimizers.gnlm import GaussNewtonLM
-from optimizers.tfp_lbfgs import LBFGS
-from optimizers.lbfgsm import LBFGSM
+from optimizers.lbfgs_tfp import LBFGS_TFP
+from optimizers.lbfgs_mascia import LBFGS_M
+from optimizers.lbfgs_python import LBFGS_PYTHON
 from utilities.tensorflow_config import tf_compile, LOW, HIGH, SENSITIVE_CALC
 
 
@@ -56,14 +57,18 @@ class Optimizer:
         elif name in ("gn", "lm"):
             opt = GaussNewtonLM(damping=cfg.gn_damping, max_iters=cfg.gn_iters, verbose=cfg.gn_verbose)
             run = self.gn  # gn as in Gauss-Newton
-        elif name == "lbfgs":
-            opt = LBFGS(max_iters=cfg.lbfgs_iters, tol=cfg.lbfgs_tol, verbose=cfg.lbfgs_verbose)
+        elif name == "lbfgs_tfp":
+            opt = LBFGS_TFP(max_iters=cfg.lbfgs_iters, tol=cfg.lbfgs_tol, verbose=cfg.lbfgs_verbose)
             run = self.gn  # reuse the same closure-based path
             self.require_full_batch = True
-        elif name == "lbfgsm":
+        elif name == "lbfgs_python":
+            opt = LBFGS_PYTHON(max_iters=cfg.lbfgs_iters, tol=cfg.lbfgs_tol, verbose=cfg.lbfgs_verbose)
+            run = self.gn  # reuse the same closure-based path
+            self.require_full_batch = True
+        elif name == "lbfgs_m":
+            raise Exception('Integration of lbfgs_m not fully done.')
             func = function_factory(model, self._loss)
-
-            opt = LBFGSM(f=func, x_list=model.trainable_variables)
+            opt = LBFGS_M(f=func, x_list=model.trainable_variables)
         else:
             raise Exception('Optimizer %s is not implemented' % name)
 
