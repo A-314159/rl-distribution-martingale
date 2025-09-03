@@ -86,7 +86,7 @@ def _two_loop(S, Y, mem_size, gamma, g):
     def bwd_body(i, q, aTA, rTA):
         si = S[i]
         yi = Y[i]
-        rho = 1.0 / _dot(yi, si)
+        rho = 1.0 / tf.maximum(_dot(yi, si), 1e-32)
         a = rho * _dot(si, q)
         q = q - a * yi
         return i - 1, q, aTA.write(i, a), rTA.write(i, rho)
@@ -120,31 +120,34 @@ def _two_loop(S, Y, mem_size, gamma, g):
 
 
 @tf_compile
-def _initial_gamma(mode_code, init_gamma, S, Y, mem_size, g, d_prev):
-    # 0=constant, 1=BB, 2=direction_match
+def _initial_gamma(mode_code, init_gamma, S, Y, mem_size, g, d_prev, gam_lo, gam_hi):
     def const():
-        return init_gamma
+        return tf.clip_by_value(init_gamma, gam_lo, gam_hi)
 
     def bb():
         idx = mem_size - 1
-        sL = S[idx]
-        yL = Y[idx]
+        sL, yL = S[idx], Y[idx]
         yTy = _dot(yL, yL)
         gam = _dot(sL, yL) / tf.maximum(yTy, 1e-32)
-        return tf.clip_by_value(gam, 1e-12, 1e12)
+        gam = tf.clip_by_value(gam, gam_lo, gam_hi)
+        gam = tf.where(tf.math.is_finite(gam), gam, tf.ones_like(gam))
+        return gam
 
+    # noinspection PyShadowingNames
+    # pylint: disable=shadowed-name
     # noinspection SpellCheckingInspection
+
     def dmatch():
         gTd = _dot(g, d_prev)
         g2 = _dot(g, g)
         gam = -gTd / tf.maximum(g2, 1e-32)
-        return tf.clip_by_value(gam, 1e-12, 1e12)
+        return tf.clip_by_value(gam, gam_lo, gam_hi)
 
     return tf.case(
         pred_fn_pairs=[
             (tf.equal(mode_code, 0), const),
             (tf.logical_and(tf.equal(mode_code, 1), mem_size > 0), bb),
-            (tf.logical_and(tf.equal(mode_code, 2), tf.reduce_any(tf.math.is_finite(d_prev))), dmatch),
+            (tf.logical_and(tf.equal(mode_code, 2), _norm(d_prev) > 0.0), dmatch),
         ],
         default=const, exclusive=False
     )
@@ -262,29 +265,30 @@ def _append_quality_prune_with_q(S, Y, Q, mem_size, s_new, y_new, q_new, m):
 def _nonmonotone_armijo(loss_and_grad, x, f, g, d,
                         f_hist, f_hist_size,
                         alpha0, c1, backtrack, max_evals):
-    """
-    Backtracking nonmonotone Armijo with warm start.
-    During backtracking trials: compute LOSS ONLY (need_gradient=False).
-    Once accepted: compute loss+grad exactly once at x_new.
-    Returns: alpha, f_new, g_new, evals, backtracks
-    """
     gTd = _dot(g, d)
+    tf_false = tf.constant(False)
+    tf_true = tf.constant(True)
 
     def fail_dir():
+        # Not a descent direction → no search, no move.
         return tf.constant(0.0, x.dtype), f, g, tf.constant(0, tf.int32), tf.constant(0, tf.int32)
 
     def search():
+        # same as your code, but we track `accepted`
         f_ref = tf.cond(f_hist_size > 0,
                         lambda: tf.reduce_max(f_hist[:f_hist_size]),
                         lambda: f)
         rhs_scale = c1 * gTd
-        tf_false, tf_true = tf.constant(False), tf.constant(True)
 
+        # noinspection PyShadowingNames
+        # pylint: disable=shadowed-name
+        # noinspection SpellCheckingInspection
         def cond(_alpha, _f_acc, evals, _backs, accepted):
             return tf.logical_and(evals < max_evals, tf.logical_not(accepted))
 
         # noinspection PyShadowingNames
         # pylint: disable=shadowed-name
+        # noinspection SpellCheckingInspection
         def body(alpha, f_acc, evals, backs, _accepted):
             x_try = x + alpha * d
             f_try, _ = loss_and_grad(x_try, tf_false)
@@ -295,17 +299,24 @@ def _nonmonotone_armijo(loss_and_grad, x, f, g, d,
             f_acc_next = tf.where(ok, f_try, f_acc)
             return alpha_next, f_acc_next, evals_next, backs_next, ok
 
-        alpha_fin, f_acc, evals_fin, backs_fin, _accepted = tf.while_loop(
+        alpha_fin, f_acc, evals_fin, backs_fin, accepted = tf.while_loop(
             cond, body,
             loop_vars=(alpha0, f, tf.constant(0, tf.int32), tf.constant(0, tf.int32), tf_false),
             maximum_iterations=max_evals, parallel_iterations=1
         )
 
-        # Compute gradient ONCE at accepted point
-        x_new = x + alpha_fin * d
-        f_new, g_new = loss_and_grad(x_new, tf_true)
-        return alpha_fin, f_new, g_new, evals_fin, backs_fin
+        def on_accept():
+            x_new = x + alpha_fin * d
+            f_new, g_new = loss_and_grad(x_new, tf_true)  # grad computed ONCE
+            return alpha_fin, f_new, g_new, evals_fin, backs_fin
 
+        def on_fail():
+            # No Armijo step found → no move (or implement a tiny fallback step if you prefer)
+            return tf.constant(0.0, x.dtype), f, g, evals_fin, backs_fin
+
+        return tf.cond(accepted, on_accept, on_fail)
+
+    # ← This is where fail_dir() is used.
     return tf.cond(gTd < 0.0, search, fail_dir)
 
 
@@ -314,176 +325,185 @@ def _hager_zhang(loss_and_grad, x, f, g, d,
                  alpha0, c1, c2, max_evals):
     """
     Exact Hager–Zhang strong Wolfe line search (bracket + zoom).
-    Requires gradient at each trial (need_gradient=True).
     Returns: alpha, f_new, g_new, evals
     """
-    g0d = _dot(g, d)
+    dtype = x.dtype
+    tf_true = tf.constant(True)
+
+    g0d = _dot(g, d)  # ← descent check
     c1g0d = c1 * g0d
     neg_c2g0d = -c2 * g0d
     f0 = f
-    dtype = x.dtype
 
-    a_prev = tf.constant(0.0, dtype)
-    f_prev = f0
-    g_prev = g
+    def fail_dir():
+        # Not a descent direction: skip search, no move.
+        return tf.constant(0.0, dtype), f0, g, tf.constant(0, tf.int32)
 
-    a_cur = tf.convert_to_tensor(alpha0, dtype)
-    f_cur, g_cur = loss_and_grad(x + a_cur * d, tf.constant(True))
-    f_cur = tf.convert_to_tensor(f_cur, dtype)
-    g_cur = tf.convert_to_tensor(g_cur, dtype)
-    evals = tf.constant(1, tf.int32)
+    def run_hz_search():
+        a_prev = tf.constant(0.0, dtype)
+        f_prev = f0
+        g_prev = g
 
-    a_lo = tf.constant(0.0, dtype)
-    f_lo = f0
-    g_lo = g
+        a_cur = tf.convert_to_tensor(alpha0, dtype)
+        f_cur, g_cur = loss_and_grad(x + a_cur * d, tf_true)
+        f_cur = tf.convert_to_tensor(f_cur, dtype)
+        g_cur = tf.convert_to_tensor(g_cur, dtype)
+        evals = tf.constant(1, tf.int32)
 
-    a_hi = tf.constant(0.0, dtype)
-    f_hi = f0
-    g_hi = g
+        a_lo = tf.constant(0.0, dtype)
+        f_lo = f0
+        g_lo = g
 
-    bracketed = tf.constant(False)
+        a_hi = tf.constant(0.0, dtype)
+        f_hi = f0
+        g_hi = g
 
-    # noinspection PyShadowingNames
-    # pylint: disable=shadowed-name
-    # noinspection SpellCheckingInspection
+        bracketed = tf.constant(False)
 
-    def bcond(_a_prev, _f_prev, _g_prev,
-              _a_cur, _f_cur, _g_cur,
-              _a_lo, _f_lo, _g_lo,
-              _a_hi, _f_hi, _g_hi,
-              bracketed, evals):
-        return tf.logical_and(tf.logical_not(bracketed), evals < max_evals)
+        # noinspection PyShadowingNames
+        # pylint: disable=shadowed-name
+        # noinspection SpellCheckingInspection
+        def bcond(_a_prev, _f_prev, _g_prev,
+                  _a_cur, _f_cur, _g_cur,
+                  _a_lo, _f_lo, _g_lo,
+                  _a_hi, _f_hi, _g_hi,
+                  bracketed, evals):
+            return tf.logical_and(tf.logical_not(bracketed), evals < max_evals)
 
-    # noinspection PyShadowingNames
-    # pylint: disable=shadowed-name
-    # noinspection SpellCheckingInspection
+        # noinspection PyShadowingNames
+        # pylint: disable=shadowed-name
+        # noinspection SpellCheckingInspection
+        def bbody(a_prev, f_prev, g_prev,
+                  a_cur, f_cur, g_cur,
+                  a_lo, f_lo, g_lo,
+                  a_hi, f_hi, g_hi,
+                  bracketed, evals):
+            gcurd = _dot(g_cur, d)
+            cond1 = tf.logical_or(f_cur > f0 + a_cur * c1g0d, f_cur >= f_prev)
+            cond2 = tf.abs(gcurd) <= neg_c2g0d
+            cond3 = gcurd >= 0.0
 
-    def bbody(a_prev, f_prev, g_prev,
-              a_cur, f_cur, g_cur,
-              a_lo, f_lo, g_lo,
-              a_hi, f_hi, g_hi,
-              bracketed, evals):
-        gcurd = _dot(g_cur, d)
-        cond1 = tf.logical_or(f_cur > f0 + a_cur * c1g0d, f_cur >= f_prev)
-        cond2 = tf.abs(gcurd) <= neg_c2g0d
-        cond3 = gcurd >= 0.0
+            def case1():
+                return (a_prev, f_prev, g_prev,
+                        a_cur, f_cur, g_cur,
+                        a_prev, f_prev, g_prev,
+                        a_cur, f_cur, g_cur,
+                        tf.constant(True), evals)
 
-        def case1():
-            return (a_prev, f_prev, g_prev,
-                    a_cur, f_cur, g_cur,
-                    a_prev, f_prev, g_prev,
-                    a_cur, f_cur, g_cur,
-                    tf.constant(True), evals)
+            def case2():
+                return (a_cur, f_cur, g_cur,
+                        a_cur, f_cur, g_cur,
+                        a_cur, f_cur, g_cur,
+                        a_cur, f_cur, g_cur,
+                        tf.constant(True), evals)
 
-        def case2():
-            return (a_cur, f_cur, g_cur,
-                    a_cur, f_cur, g_cur,
-                    a_cur, f_cur, g_cur,
-                    a_cur, f_cur, g_cur,
-                    tf.constant(True), evals)
+            def case3():
+                a_n = a_cur * 2.0
+                f_n, g_n = loss_and_grad(x + a_n * d, tf_true)
+                f_n = tf.convert_to_tensor(f_n, dtype)
+                g_n = tf.convert_to_tensor(g_n, dtype)
+                return (a_cur, f_cur, g_cur,
+                        a_n, f_n, g_n,
+                        a_lo, f_lo, g_lo,
+                        a_hi, f_hi, g_hi,
+                        bracketed, evals + 1)
 
-        def case3():
-            a_n = a_cur * 2.0
-            f_n, g_n = loss_and_grad(x + a_n * d, tf.constant(True))
-            f_n = tf.convert_to_tensor(f_n, dtype)
-            g_n = tf.convert_to_tensor(g_n, dtype)
-            return (a_cur, f_cur, g_cur,
-                    a_n, f_n, g_n,
-                    a_lo, f_lo, g_lo,
-                    a_hi, f_hi, g_hi,
-                    bracketed, evals + 1)
+            def case4():
+                return (a_prev, f_prev, g_prev,
+                        a_cur, f_cur, g_cur,
+                        a_cur, f_cur, g_cur,
+                        a_prev, f_prev, g_prev,
+                        tf.constant(True), evals)
 
-        def case4():
-            return (a_prev, f_prev, g_prev,
-                    a_cur, f_cur, g_cur,
-                    a_cur, f_cur, g_cur,
-                    a_prev, f_prev, g_prev,
-                    tf.constant(True), evals)
+            return tf.case([(cond1, case1), (cond2, case2), (cond3, case4)],
+                           default=case3, exclusive=False)
 
-        return tf.case([(cond1, case1), (cond2, case2), (cond3, case4)],
-                       default=case3, exclusive=False)
+        (a_prev, f_prev, g_prev,
+         a_cur, f_cur, g_cur,
+         a_lo, f_lo, g_lo,
+         a_hi, f_hi, g_hi,
+         bracketed, evals) = tf.while_loop(
+            bcond, bbody,
+            loop_vars=(a_prev, f_prev, g_prev,
+                       a_cur, f_cur, g_cur,
+                       a_lo, f_lo, g_lo,
+                       a_hi, f_hi, g_hi,
+                       bracketed, evals),
+            maximum_iterations=max_evals, parallel_iterations=1
+        )
 
-    (a_prev, f_prev, g_prev,
-     a_cur, f_cur, g_cur,
-     a_lo, f_lo, g_lo,
-     a_hi, f_hi, g_hi,
-     bracketed, evals) = tf.while_loop(
-        bcond, bbody,
-        loop_vars=(a_prev, f_prev, g_prev,
-                   a_cur, f_cur, g_cur,
-                   a_lo, f_lo, g_lo,
-                   a_hi, f_hi, g_hi,
-                   bracketed, evals),
-        maximum_iterations=max_evals, parallel_iterations=1
-    )
+        a_star = tf.constant(0.0, dtype)
+        f_star = f0
+        g_star = g
+        done = tf.constant(False)
 
-    a_star = tf.constant(0.0, dtype)
-    f_star = f0
-    g_star = g
-    done = tf.constant(False)
+        tol_alpha = tf.constant(1e-12, dtype)  # tiny-interval escape
 
-    # noinspection PyShadowingNames
-    # pylint: disable=shadowed-name
-    # noinspection SpellCheckingInspection
+        # noinspection PyShadowingNames
+        # pylint: disable=shadowed-name
+        # noinspection SpellCheckingInspection
+        def zcond(_a_lo, _f_lo, _g_lo,
+                  _a_hi, _f_hi, _g_hi,
+                  evals, done, _a_star, _f_star, _g_star):
+            small = tf.abs(_a_hi - _a_lo) < tol_alpha
+            return tf.logical_and(tf.logical_not(done),
+                                  tf.logical_and(evals < max_evals, tf.logical_not(small)))
 
-    def zcond(_a_lo, _f_lo, _g_lo,
-              _a_hi, _f_hi, _g_hi,
-              evals, done, _a_star, _f_star, _g_star):
-        return tf.logical_and(tf.logical_not(done), evals < max_evals)
+        # noinspection PyShadowingNames
+        # pylint: disable=shadowed-name
+        # noinspection SpellCheckingInspection
+        def zbody(a_lo, f_lo, g_lo,
+                  a_hi, f_hi, g_hi,
+                  evals, done, a_star, f_star, g_star):
+            a = 0.5 * (a_lo + a_hi)
+            f_try, g_try = loss_and_grad(x + a * d, tf_true)
+            f_try = tf.convert_to_tensor(f_try, dtype)
+            g_try = tf.convert_to_tensor(g_try, dtype)
+            gtryd = _dot(g_try, d)
 
-    # noinspection PyShadowingNames
-    # pylint: disable=shadowed-name
-    # noinspection SpellCheckingInspection
+            cond1 = tf.logical_or(f_try > f0 + a * c1g0d, f_try >= f_lo)
+            cond2 = tf.abs(gtryd) <= neg_c2g0d
 
-    def zbody(a_lo, f_lo, g_lo,
-              a_hi, f_hi, g_hi,
-              evals, done, a_star, f_star, g_star):
-        a = 0.5 * (a_lo + a_hi)
-        f_try, g_try = loss_and_grad(x + a * d, tf.constant(True))
-        f_try = tf.convert_to_tensor(f_try, dtype)
-        g_try = tf.convert_to_tensor(g_try, dtype)
-        gtryd = _dot(g_try, d)
+            def case1():
+                return a_lo, f_lo, g_lo, a, f_try, g_try, evals + 1, done, a_star, f_star, g_star
 
-        cond1 = tf.logical_or(f_try > f0 + a * c1g0d, f_try >= f_lo)
-        cond2 = tf.abs(gtryd) <= neg_c2g0d
+            def case2():
+                return a, f_try, g_try, a_hi, f_hi, g_hi, evals + 1, tf.constant(True), a, f_try, g_try
 
-        def case1():
-            return a_lo, f_lo, g_lo, a, f_try, g_try, evals + 1, done, a_star, f_star, g_star
+            def case3():
+                sign_change = gtryd * _dot(g_lo, d) < 0.0
 
-        def case2():
-            return a, f_try, g_try, a_hi, f_hi, g_hi, evals + 1, tf.constant(True), a, f_try, g_try
+                def flip():
+                    return a, f_try, g_try, a_lo, f_lo, g_lo, evals + 1, done, a_star, f_star, g_star
 
-        def case3():
-            sign_change = gtryd * _dot(g_lo, d) < 0.0
+                def keep():
+                    return a, f_try, g_try, a_hi, f_hi, g_hi, evals + 1, done, a_star, f_star, g_star
 
-            def flip():
-                return a, f_try, g_try, a_lo, f_lo, g_lo, evals + 1, done, a_star, f_star, g_star
+                return tf.cond(sign_change, flip, keep)
 
-            def keep():
-                return a, f_try, g_try, a_hi, f_hi, g_hi, evals + 1, done, a_star, f_star, g_star
+            return tf.case([(cond1, case1), (cond2, case2)], default=case3, exclusive=False)
 
-            return tf.cond(sign_change, flip, keep)
+        (a_lo, f_lo, g_lo,
+         a_hi, f_hi, g_hi,
+         evals, done, a_star, f_star, g_star) = tf.while_loop(
+            zcond, zbody,
+            loop_vars=(a_lo, f_lo, g_lo,
+                       a_hi, f_hi, g_hi,
+                       evals, done, a_star, f_star, g_star),
+            maximum_iterations=max_evals, parallel_iterations=1
+        )
 
-        return tf.case([(cond1, case1), (cond2, case2)], default=case3, exclusive=False)
+        return a_star, f_star, g_star, evals
 
-    (a_lo, f_lo, g_lo,
-     a_hi, f_hi, g_hi,
-     evals, done, a_star, f_star, g_star) = tf.while_loop(
-        zcond, zbody,
-        loop_vars=(a_lo, f_lo, g_lo,
-                   a_hi, f_hi, g_hi,
-                   evals, done, a_star, f_star, g_star),
-        maximum_iterations=max_evals, parallel_iterations=1
-    )
-
-    return a_star, f_star, g_star, evals
+    # Descent guard at the top-level:
+    return tf.cond(g0d < 0.0, run_hz_search, fail_dir)
 
 
 # ---------------- compile checks ----------------
 
 def _is_tf_function(fn) -> bool:
     """
-    Heuristic: tf.function objects have a 'get_concrete_function' attribute
+    Heuristic: 'tf.function' objects have a 'get_concrete_function' attribute
     (and a 'python_function' backref). Raw Python callables won't.
     Works for functions decorated by your @tf_compile in non-eager mode.
     """
@@ -539,6 +559,15 @@ class LBFGSStepper:
         self.gamma_mode = tf.constant({"constant": 0, "bb": 1, "direction_match": 2}[init_scaling], tf.int32)
         self.gamma_init = tf.constant(init_gamma, dtype)
         self.eps_curv = tf.constant(eps_curv, dtype)
+
+        if dtype == tf.float64:
+            lo, hi = 1e-6, 1e6
+        elif dtype == tf.float32:
+            lo, hi = 1e-4, 1e4
+        else:  # e.g., bf16/fp16
+            lo, hi = 1e-2, 1e2
+        self.gam_lo = tf.constant(lo, dtype)
+        self.gam_hi = tf.constant(hi, dtype)
 
         if callable(loss_and_grad):
             _assert_compilation_mode(loss_and_grad, "loss_and_grad")
@@ -601,6 +630,23 @@ class LBFGSStepper:
 
             self.x = tf.Variable(tf.identity(x0), dtype=dtype, trainable=False)
 
+        # pick a dtype-friendly floor (you can set these in __init__ once)
+        self.alpha_floor = tf.constant(1e-8 if self.x.dtype == tf.float64 else 1e-6, self.x.dtype)
+
+        tf_true = tf.constant(True)
+        tf_false = tf.constant(False)
+
+        # Check gradients path
+        fT, gT = self.loss_and_grad(self.x, tf_true)
+        tf.debugging.assert_rank_at_least(fT, 0)
+        tf.debugging.assert_equal(tf.shape(gT)[0], tf.shape(self.x)[0], message="grad size mismatch")
+        tf.debugging.assert_all_finite(fT, "loss not finite at init")
+        tf.debugging.assert_all_finite(gT, "grad not finite at init")
+
+        # Check loss-only path returns a loss Tensor
+        fF, gF = self.loss_and_grad(self.x, tf_false)
+        tf.debugging.assert_rank_at_least(fF, 0)
+
         # Evaluate initial f,g
         f0, g0 = self.loss_and_grad(self.x, tf.constant(True))
         self.f = tf.Variable(tf.convert_to_tensor(f0, dtype), trainable=False)
@@ -620,8 +666,8 @@ class LBFGSStepper:
         self.alpha_prev = tf.Variable(1.0, dtype=dtype, trainable=False)
         self.d_prev = tf.Variable(tf.zeros_like(self.x), trainable=False)
 
-        self.f_hist = tf.Variable(tf.fill([self.window], tf.constant(-1e308, dtype)), trainable=False)
-        self.f_hist_size = tf.Variable(0, dtype=tf.int32, trainable=False)
+        self.f_hist = tf.Variable(tf.fill([self.window], tf.cast(self.f, dtype)), trainable=False)
+        self.f_hist_size = tf.Variable(1, dtype=tf.int32, trainable=False)
 
     @tf_compile
     def step(self, iters: tf.Tensor):
@@ -647,10 +693,12 @@ class LBFGSStepper:
 
         def body(i, fTA, gTA, aTA, eTA, mTA, qTA):
             gamma = _initial_gamma(self.gamma_mode, self.gamma_init,
-                                   self.S, self.Y, self.mem_size, self.g, self.d_prev)
+                                   self.S, self.Y, self.mem_size, self.g, self.d_prev,
+                                   self.gam_lo, self.gam_hi)
+
             d = -_two_loop(self.S[:self.mem_size], self.Y[:self.mem_size], self.mem_size, gamma, self.g)
 
-            alpha0 = tf.minimum(1.0, 2.0 * self.alpha_prev)
+            alpha0 = tf.maximum(self.alpha_floor, tf.minimum(1.0, 2.0 * self.alpha_prev))
 
             if self.line_search == "nonmonotone_armijo":
                 alpha, f_new, g_new, evals, backs = _nonmonotone_armijo(
