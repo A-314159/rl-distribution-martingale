@@ -114,7 +114,7 @@ def _two_loop(S, Y, mem_size, gamma, g):
 
     _, r = tf.while_loop(
         fwd_cond, fwd_body, loop_vars=(0, r),
-        maximum_iterations=100000, parallel_iterations=1
+        maximum_iterations=mem_size, parallel_iterations=1
     )
     return r
 
@@ -166,7 +166,7 @@ def _powell_damp(s, y, gamma):
     return tf.cond(sTy >= 0.2 * sBs, no, yes)
 
 
-@tf.function
+@tf_compile
 def _powell_damp_with_ss(s, y, gamma, s_s):
     sTy = _dot(s, y)
     sBs = (1.0 / tf.maximum(gamma, 1e-32)) * s_s
@@ -479,6 +479,33 @@ def _hager_zhang(loss_and_grad, x, f, g, d,
     return a_star, f_star, g_star, evals
 
 
+# ---------------- compile checks ----------------
+
+def _is_tf_function(fn) -> bool:
+    """
+    Heuristic: tf.function objects have a 'get_concrete_function' attribute
+    (and a 'python_function' backref). Raw Python callables won't.
+    Works for functions decorated by your @tf_compile in non-eager mode.
+    """
+    return callable(getattr(fn, "get_concrete_function", None))
+
+
+def _assert_compilation_mode(fn, fn_name="loss_and_grad"):
+    if tf.executing_eagerly():
+        # Eager/debug: both compiled and raw functions work.
+        # Optional hint if compiled (some people prefer raw for debugging).
+        if _is_tf_function(fn):
+            tf.print("[info]", fn_name, "is compiled but running in eager mode; "
+                                        "that’s fine, just note step-by-step Python debugging may be less convenient.")
+    else:
+        # Graph mode: prefer compiled to reduce overhead/retracing.
+        if not _is_tf_function(fn):
+            tf.print("[warn]", fn_name, "is not a tf.function while running in graph mode; "
+                                        "it will still work (AutoGraph will inline it), but consider decorating with "
+                                        "@tf_compile"
+                                        "to reduce retracing and enable XLA if desired.")
+
+
 # ======================= The L-BFGS stepper ==================================
 
 class LBFGSStepper:
@@ -512,6 +539,11 @@ class LBFGSStepper:
         self.gamma_mode = tf.constant({"constant": 0, "bb": 1, "direction_match": 2}[init_scaling], tf.int32)
         self.gamma_init = tf.constant(init_gamma, dtype)
         self.eps_curv = tf.constant(eps_curv, dtype)
+
+        if callable(loss_and_grad):
+            _assert_compilation_mode(loss_and_grad, "loss_and_grad")
+        else:
+            raise TypeError("loss_and_grad must be callable")
 
         # Support tensor x0 OR list-of-variables x0
         if isinstance(x0, list):
@@ -548,7 +580,7 @@ class LBFGSStepper:
                     # Try two-arg signature
                     test = loss_and_grad(tf.convert_to_tensor(x0, dtype), tf.constant(True))
                     _ = test
-                    self.loss_and_grad = tf.function(loss_and_grad)
+                    self.loss_and_grad = loss_and_grad
                 except TypeError:
 
                     @tf_compile
@@ -563,7 +595,7 @@ class LBFGSStepper:
 
                         return tf.cond(need_gradient, with_grad, no_grad)
 
-                    self.loss_and_grad = tf.function(_wrap)
+                    self.loss_and_grad = _wrap
             else:
                 raise TypeError("loss_and_grad must be callable")
 
@@ -658,14 +690,14 @@ class LBFGSStepper:
             q_new = sTy_used / tf.maximum(s_norm * y_norm, 1e-12)
 
             def upd_fifo():
-                return _append_fifo_with_q(self.S, self.Y, self.mem_size, s, y_used, q_new, self.m)
+                return _append_fifo_with_q(self.S, self.Y, self.Q, self.mem_size, s, y_used, q_new, self.m)
 
             def upd_qp():
-                return _append_quality_prune_with_q(self.S, self.Y, self.mem_size, s, y_used, q_new, self.m)
+                return _append_quality_prune_with_q(self.S, self.Y, self.Q, self.mem_size, s, y_used, q_new, self.m)
 
-            S2, Y2, ms2 = tf.cond(accept,
-                                  lambda: (upd_fifo() if self.memory_update == "fifo" else upd_qp()),
-                                  lambda: (self.S, self.Y, self.mem_size))
+            S2, Y2, Q2, ms2 = tf.cond(accept,
+                                      lambda: (upd_fifo() if self.memory_update == "fifo" else upd_qp()),
+                                      lambda: (self.S, self.Y, self.Q, self.mem_size))
 
             # Commit state
             self.x.assign(x_new)
@@ -674,6 +706,7 @@ class LBFGSStepper:
             self.g_norm.assign(_norm(self.g))
             self.S.assign(S2)
             self.Y.assign(Y2)
+            self.Q.assign(Q2)
             self.mem_size.assign(ms2)
             self.alpha_prev.assign(alpha)
             self.d_prev.assign(d)
@@ -697,17 +730,13 @@ class LBFGSStepper:
 
             tf.cond(tf.constant(True), upd_fhist, lambda: tf.constant(0))
 
-            # Log
-            # noinspection SpellCheckingInspection
-            qual = sTy_used / tf.maximum(s_norm * y_norm, 1e-12)
-
             return (i + 1,
                     fTA.write(i, f_new),
                     gTA.write(i, self.g_norm.read_value()),
                     aTA.write(i, alpha),
                     eTA.write(i, evals_or_backs),
                     mTA.write(i, self.mem_size.read_value()),
-                    qTA.write(i, qual))
+                    qTA.write(i, q_new))
 
         # noinspection SpellCheckingInspection
         _, f_TA, gnorm_TA, alpha_TA, evals_TA, msize_TA, qual_TA = tf.while_loop(
@@ -732,5 +761,6 @@ class LBFGSStepper:
             "mem_size": self.mem_size.read_value(),
             "S": self.S[:self.mem_size],
             "Y": self.Y[:self.mem_size],
+            "Q": self.Q[:self.mem_size],
             "history": history
         }
