@@ -1,6 +1,7 @@
 from utilities.tensorflow_config import tf_compile
 import tensorflow as tf
 
+
 #------------------------------------------------
 #  Methods for optimizer
 #------------------------------------------------
@@ -26,6 +27,7 @@ def unpack_like(x, template_list):
         offset += size
     return tensor_list
 
+
 @tf_compile
 def add(x_list, y):
     """
@@ -33,3 +35,12 @@ def add(x_list, y):
     """
     for v, d in zip(x_list, unpack_like(y, x_list)):
         v.assign_add(d)
+
+
+@tf_compile
+def assign(x_list, y):
+    """
+    convert a 1D tensor y to a list of tensors and add them to the tensors of x
+    """
+    for v, d in zip(x_list, unpack_like(y, x_list)):
+        v.assign(d)

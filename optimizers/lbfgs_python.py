@@ -1,6 +1,8 @@
 # --------------------------------------------------------------------------
 # 'eager' version w/out graph and @tf_function
 # c.f. explanations in https://chatgpt.com/share/68b47ba4-69e0-800a-891a-56aba89e89fd
+# warning: integration not finished at all (I focused on the graph version instead.
+#  No need to integrate both. This file will probably be removed.
 # --------------------------------------------------------------------------
 """
 TensorFlow L-BFGS(D) optimizer with:
@@ -124,7 +126,7 @@ class HagerZhang(LineSearchBase):
         a0, a1 = 0.0, min(self.amax, float(alpha0))
         f_a0, g_a0 = f0, g0
         evals, backtracks = 0, 0
-        f_a1, g_a1 = self._phi(x, d, a1, loss_and_grad);
+        f_a1, g_a1 = self._phi(x, d, a1, loss_and_grad)
         evals += 1
         while True:
             if (f_a1 > f0 + self.c1 * a1 * g0Td) or (evals > 1 and f_a1 >= f_a0):
@@ -140,7 +142,7 @@ class HagerZhang(LineSearchBase):
                 return LineSearchResult(alpha, f_final, g_final, evals + evals_zoom, backtracks + bts, True, "zoom")
             a2 = min(self.amax, 2.0 * a1)
             a0, f_a0, a1 = a1, f_a1, a2
-            f_a1, g_a1 = self._phi(x, d, a1, loss_and_grad);
+            f_a1, g_a1 = self._phi(x, d, a1, loss_and_grad)
             evals += 1
             if evals >= self.max_evals:
                 return LineSearchResult(a1, f_a1, g_a1, evals, backtracks, True, "eval_cap")
@@ -149,7 +151,7 @@ class HagerZhang(LineSearchBase):
         evals, backtracks = 0, 0
         while True:
             aj = 0.5 * (alo + ahi)
-            f_aj, g_aj = self._phi(x, d, aj, loss_and_grad);
+            f_aj, g_aj = self._phi(x, d, aj, loss_and_grad)
             evals += 1
             if (f_aj > f0 + self.c1 * aj * g0Td) or (f_aj >= flo):
                 ahi, fhi = aj, f_aj
@@ -336,7 +338,7 @@ class LBFGS_PYTHON:
             history['cos_dir'].append(cos_dir)
             history['m'].append(len(self.S))
             history['sTy'].append(sTy)
-            history['pair_quality'].append(quality);
+            history['pair_quality'].append(quality)
             history['accepted_pairs'].append(1 if accepted_pair else 0)
             history['skipped_pairs'].append(0 if accepted_pair else 1)
             if self.cfg.verbose and (k % 10 == 0 or k < 5):
