@@ -73,7 +73,7 @@ def _norm(a):
 # ======================== L-BFGS primitives ==================================
 
 @tf_compile
-def _two_loop(S, Y, mem_size, gamma, g):
+def _two_loop(S, Y, mem_size, gamma, g, eps_div):
     """L-BFGS two-loop recursion, all in TF control flow."""
     alpha_TA = tf.TensorArray(g.dtype, size=mem_size, clear_after_read=False)
     rho_TA = tf.TensorArray(g.dtype, size=mem_size, clear_after_read=False)
@@ -86,7 +86,7 @@ def _two_loop(S, Y, mem_size, gamma, g):
     def bwd_body(i, q, aTA, rTA):
         si = S[i]
         yi = Y[i]
-        rho = 1.0 / tf.maximum(_dot(yi, si), 1e-32)
+        rho = 1.0 / tf.maximum(_dot(yi, si), eps_div)
         a = rho * _dot(si, q)
         q = q - a * yi
         return i - 1, q, aTA.write(i, a), rTA.write(i, rho)
@@ -120,7 +120,7 @@ def _two_loop(S, Y, mem_size, gamma, g):
 
 
 @tf_compile
-def _initial_gamma(mode_code, init_gamma, S, Y, mem_size, g, d_prev, gam_lo, gam_hi):
+def _initial_gamma(mode_code, init_gamma, S, Y, mem_size, g, d_prev, gam_lo, gam_hi, eps_div):
     def const():
         return tf.clip_by_value(init_gamma, gam_lo, gam_hi)
 
@@ -128,7 +128,7 @@ def _initial_gamma(mode_code, init_gamma, S, Y, mem_size, g, d_prev, gam_lo, gam
         idx = mem_size - 1
         sL, yL = S[idx], Y[idx]
         yTy = _dot(yL, yL)
-        gam = _dot(sL, yL) / tf.maximum(yTy, 1e-32)
+        gam = _dot(sL, yL) / tf.maximum(yTy, eps_div)
         gam = tf.clip_by_value(gam, gam_lo, gam_hi)
         gam = tf.where(tf.math.is_finite(gam), gam, tf.ones_like(gam))
         return gam
@@ -140,7 +140,7 @@ def _initial_gamma(mode_code, init_gamma, S, Y, mem_size, g, d_prev, gam_lo, gam
     def dmatch():
         gTd = _dot(g, d_prev)
         g2 = _dot(g, g)
-        gam = -gTd / tf.maximum(g2, 1e-32)
+        gam = -gTd / tf.maximum(g2, eps_div)
         return tf.clip_by_value(gam, gam_lo, gam_hi)
 
     return tf.case(
@@ -153,52 +153,24 @@ def _initial_gamma(mode_code, init_gamma, S, Y, mem_size, g, d_prev, gam_lo, gam
     )
 
 
+# ======================== L-BFGS primitives ==================================
+
+
 @tf_compile
-def _powell_damp(s, y, gamma):
+def _powell_damp_with_ss(s, y, gamma, s_s, gam_lo, eps_div):
     sTy = _dot(s, y)
-    sBs = (1.0 / tf.maximum(gamma, 1e-32)) * _dot(s, s)
+    inv_g = 1.0 / tf.maximum(gamma, gam_lo)  # use clamp floor
+    sBs = inv_g * s_s
 
     def no():
         return y
 
     def yes():
-        theta = 0.8 * sBs / tf.maximum(sBs - sTy, 1e-32)
-        Bs = (1.0 / tf.maximum(gamma, 1e-32)) * s
+        theta = 0.8 * sBs / tf.maximum(sBs - sTy, eps_div)
+        Bs = inv_g * s
         return theta * y + (1.0 - theta) * Bs
 
     return tf.cond(sTy >= 0.2 * sBs, no, yes)
-
-
-@tf_compile
-def _powell_damp_with_ss(s, y, gamma, s_s):
-    sTy = _dot(s, y)
-    sBs = (1.0 / tf.maximum(gamma, 1e-32)) * s_s
-
-    def no():
-        return y
-
-    def yes():
-        theta = 0.8 * sBs / tf.maximum(sBs - sTy, 1e-32)
-        Bs = (1.0 / tf.maximum(gamma, 1e-32)) * s
-        return theta * y + (1.0 - theta) * Bs
-
-    return tf.cond(sTy >= 0.2 * sBs, no, yes)
-
-
-@tf_compile
-def _append_fifo(S, Y, mem_size, s_new, y_new, m):
-    def not_full():
-        idx = tf.cast(mem_size, tf.int32)
-        S2 = tf.tensor_scatter_nd_update(S, indices=[[idx]], updates=[s_new])
-        Y2 = tf.tensor_scatter_nd_update(Y, indices=[[idx]], updates=[y_new])
-        return S2, Y2, mem_size + 1
-
-    def full():
-        S2 = tf.concat([S[1:], tf.expand_dims(s_new, 0)], axis=0)
-        Y2 = tf.concat([Y[1:], tf.expand_dims(y_new, 0)], axis=0)
-        return S2, Y2, mem_size
-
-    return tf.cond(mem_size < m, not_full, full)
 
 
 @tf_compile
@@ -322,7 +294,7 @@ def _nonmonotone_armijo(loss_and_grad, x, f, g, d,
 
 @tf_compile
 def _hager_zhang(loss_and_grad, x, f, g, d,
-                 alpha0, c1, c2, max_evals):
+                 alpha0, c1, c2, max_evals, tol_alpha):
     """
     Exact Hager–Zhang strong Wolfe line search (bracket + zoom).
     Returns: alpha, f_new, g_new, evals
@@ -334,6 +306,7 @@ def _hager_zhang(loss_and_grad, x, f, g, d,
     c1g0d = c1 * g0d
     neg_c2g0d = -c2 * g0d
     f0 = f
+    tol_alpha = tf.convert_to_tensor(tol_alpha, dtype)
 
     def fail_dir():
         # Not a descent direction: skip search, no move.
@@ -436,8 +409,6 @@ def _hager_zhang(loss_and_grad, x, f, g, d,
         f_star = f0
         g_star = g
         done = tf.constant(False)
-
-        tol_alpha = tf.constant(1e-12, dtype)  # tiny-interval escape
 
         # noinspection PyShadowingNames
         # pylint: disable=shadowed-name
@@ -569,6 +540,33 @@ class LBFGSStepper:
         self.gam_lo = tf.constant(lo, dtype)
         self.gam_hi = tf.constant(hi, dtype)
 
+        # Dtype-aware small constants
+        if dtype == tf.float64:
+            eps_div = 1e-32  # denominator floors for dot products
+            eps_q = 1e-16  # floors for norms/products in quality metrics
+            tol_alpha = 1e-12  # tiny interval for HZ zoom
+            alpha_floor = 1e-8
+        elif dtype == tf.float32:
+            eps_div = 1e-32
+            eps_q = 1e-8
+            tol_alpha = 1e-8
+            alpha_floor = 1e-6
+        elif dtype == tf.float16:
+            eps_div = 1e-7  # >= subnormal scale for fp16
+            eps_q = 1e-4
+            tol_alpha = 1e-4
+            alpha_floor = 1e-3
+        else:  # bfloat16
+            eps_div = 1e-30  # representable in bf16; exponent is wide
+            eps_q = 1e-4
+            tol_alpha = 1e-4
+            alpha_floor = 1e-3
+
+        self.eps_div = tf.constant(eps_div, dtype)
+        self.eps_q = tf.constant(eps_q, dtype)
+        self.tol_alpha = tf.constant(tol_alpha, dtype)
+        self.alpha_floor = tf.constant(alpha_floor, dtype)  # replaces earlier line
+
         if callable(loss_and_grad):
             _assert_compilation_mode(loss_and_grad, "loss_and_grad")
         else:
@@ -694,9 +692,14 @@ class LBFGSStepper:
         def body(i, fTA, gTA, aTA, eTA, mTA, qTA):
             gamma = _initial_gamma(self.gamma_mode, self.gamma_init,
                                    self.S, self.Y, self.mem_size, self.g, self.d_prev,
-                                   self.gam_lo, self.gam_hi)
+                                   self.gam_lo, self.gam_hi, self.eps_div)
 
-            d = -_two_loop(self.S[:self.mem_size], self.Y[:self.mem_size], self.mem_size, gamma, self.g)
+            d = -_two_loop(self.S[:self.mem_size], self.Y[:self.mem_size],
+                           self.mem_size, gamma, self.g, self.eps_div)
+
+            # If the two-loop produced any non-finite, fall back to steepest descent
+            all_finite_d = tf.reduce_all(tf.math.is_finite(d))
+            d = tf.cond(all_finite_d, lambda: d, lambda: -self.g)
 
             alpha0 = tf.maximum(self.alpha_floor, tf.minimum(1.0, 2.0 * self.alpha_prev))
 
@@ -710,10 +713,29 @@ class LBFGSStepper:
             else:
                 alpha, f_new, g_new, evals = _hager_zhang(
                     self.loss_and_grad, self.x, self.f, self.g, d,
-                    alpha0, self.c1, self.c2, self.max_evals
+                    alpha0, self.c1, self.c2, self.max_evals, self.tol_alpha
                 )
                 evals_or_backs = evals
 
+            bad_new = tf.logical_or(
+                tf.logical_not(tf.math.is_finite(f_new)),
+                tf.logical_not(tf.reduce_all(tf.math.is_finite(g_new)))
+            )
+
+            def _clear_hist_no_move():
+                # Clear curvature history to recover next iter
+                self.S.assign(tf.zeros_like(self.S))
+                self.Y.assign(tf.zeros_like(self.Y))
+                self.Q.assign(tf.zeros_like(self.Q))
+                self.mem_size.assign(0)
+                # No move: keep current f,g; force alpha=0 so x_new == self.x
+                return tf.constant(0.0, dtype), self.f.read_value(), self.g.read_value()
+
+            alpha, f_new, g_new = tf.cond(
+                bad_new,
+                _clear_hist_no_move,
+                lambda: (alpha, f_new, g_new)
+            )
             x_new = self.x + alpha * d
             s = x_new - self.x
             y = g_new - self.g
@@ -724,7 +746,7 @@ class LBFGSStepper:
 
             # Powell damping (same behavior, but use s_s to avoid recompute)
             y_used = tf.cond(self.powell > 0,
-                             lambda: _powell_damp_with_ss(s, y, gamma, s_s),  # small helper below
+                             lambda: _powell_damp_with_ss(s, y, gamma, s_s, self.gam_lo, self.eps_div),  # small helper below
                              lambda: y)
 
             # These are re-used by accept+log
@@ -735,7 +757,7 @@ class LBFGSStepper:
             # Accept pair?
             accept = sTy_used > self.eps_curv * s_norm * y_norm
 
-            q_new = sTy_used / tf.maximum(s_norm * y_norm, 1e-12)
+            q_new = sTy_used / tf.maximum(s_norm * y_norm, self.eps_q)
 
             def upd_fifo():
                 return _append_fifo_with_q(self.S, self.Y, self.Q, self.mem_size, s, y_used, q_new, self.m)
