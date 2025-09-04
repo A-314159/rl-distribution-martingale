@@ -136,7 +136,6 @@ def _initial_gamma(mode_code, init_gamma, S, Y, mem_size, g, d_prev, gam_lo, gam
     # noinspection PyShadowingNames
     # pylint: disable=shadowed-name
     # noinspection SpellCheckingInspection
-
     def dmatch():
         gTd = _dot(g, d_prev)
         g2 = _dot(g, g)
@@ -154,7 +153,6 @@ def _initial_gamma(mode_code, init_gamma, S, Y, mem_size, g, d_prev, gam_lo, gam
 
 
 # ======================== L-BFGS primitives ==================================
-
 
 @tf_compile
 def _powell_damp_with_ss(s, y, gamma, s_s, gam_lo, eps_div):
@@ -187,27 +185,6 @@ def _append_fifo_with_q(S, Y, Q, mem_size, s_new, y_new, q_new, m):
         Y2 = tf.concat([Y[1:], tf.expand_dims(y_new, 0)], 0)
         Q2 = tf.concat([Q[1:], tf.expand_dims(q_new, 0)], 0)
         return S2, Y2, Q2, mem_size
-
-    return tf.cond(mem_size < m, not_full, full)
-
-
-@tf_compile
-def _append_quality_prune(S, Y, mem_size, s_new, y_new, m):
-    def not_full():
-        idx = tf.cast(mem_size, tf.int32)
-        S2 = tf.tensor_scatter_nd_update(S, indices=[[idx]], updates=[s_new])
-        Y2 = tf.tensor_scatter_nd_update(Y, indices=[[idx]], updates=[y_new])
-        return S2, Y2, mem_size + 1
-
-    # noinspection SpellCheckingInspection
-
-    def full():
-        dot_sy = tf.reduce_sum(S * Y, axis=1)
-        qual = dot_sy / tf.maximum(tf.norm(S, axis=1) * tf.norm(Y, axis=1), 1e-12)
-        worst = tf.argmin(qual, output_type=tf.int32)
-        S2 = tf.tensor_scatter_nd_update(S, indices=[[worst]], updates=[s_new])
-        Y2 = tf.tensor_scatter_nd_update(Y, indices=[[worst]], updates=[y_new])
-        return S2, Y2, mem_size
 
     return tf.cond(mem_size < m, not_full, full)
 
@@ -565,7 +542,7 @@ class LBFGSStepper:
         self.eps_div = tf.constant(eps_div, dtype)
         self.eps_q = tf.constant(eps_q, dtype)
         self.tol_alpha = tf.constant(tol_alpha, dtype)
-        self.alpha_floor = tf.constant(alpha_floor, dtype)  # replaces earlier line
+        self.alpha_floor = tf.constant(alpha_floor, dtype)
 
         if callable(loss_and_grad):
             _assert_compilation_mode(loss_and_grad, "loss_and_grad")
@@ -627,9 +604,6 @@ class LBFGSStepper:
                 raise TypeError("loss_and_grad must be callable")
 
             self.x = tf.Variable(tf.identity(x0), dtype=dtype, trainable=False)
-
-        # pick a dtype-friendly floor (you can set these in __init__ once)
-        self.alpha_floor = tf.constant(1e-8 if self.x.dtype == tf.float64 else 1e-6, self.x.dtype)
 
         tf_true = tf.constant(True)
         tf_false = tf.constant(False)
@@ -746,7 +720,8 @@ class LBFGSStepper:
 
             # Powell damping (same behavior, but use s_s to avoid recompute)
             y_used = tf.cond(self.powell > 0,
-                             lambda: _powell_damp_with_ss(s, y, gamma, s_s, self.gam_lo, self.eps_div),  # small helper below
+                             lambda: _powell_damp_with_ss(s, y, gamma, s_s, self.gam_lo, self.eps_div),
+                             # small helper below
                              lambda: y)
 
             # These are re-used by accept+log

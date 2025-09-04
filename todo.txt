@@ -1,35 +1,50 @@
 ------------------------------------------------------------
-My todo list:
-a) Finish integration of taylor made LBFGS:
-    a-1) First, integrate and test the version dubbed 'eager' (because not using graph): it is easier to debug.
-    a-2) Then, once my GPU set-up is ready, integrate and test the version for graph: code is more complex and it is only needed for GPU/NPU.
-b) Test the optimizer classes:
-    b-1) gnlm (but param need to be fine-tune, very slow as is)
-    b-2) tfp's lbfgs (but little control on the algo)
-    b-3) tailored lbfgs (eager)
-c) Test in full batch once the chart is available to check if the distribution converges. Try GNLM, LBFGS. Try float32, with graph exec. Debug on hint distribution for now.
-d) Once working:
-    d-1) launch a long training and check is distribution = MC distrib
-    d-2) integrated and test the bandit adaptive version of lbfgs
-e) Try the agent mode of chat gpt (later)
-f) Try the cloud computing
-g) Build a word document to summarize what I did to create the repo, commit, push, how to use github, use the agent, use cloud computing via github
-h) Continue reviewing my paper
-i) Once GPU is ready: (maybe try: https://www.crazywebstudio.co.th/blog/how-to-solve-code-43-nvidia-gtx10xx-or-rtx20xx-gpu-problem/)
-    i-1) Refactor the train method into a tf_function (otherwise perf loss 10x-100x)
-    i-2) Test the tailored lbfgs graph (otherwise perf loss 10x-100x)
-j) Merge with my prior work on martingale
-    j-1) Think about how to make a more generic implementation:
-        j-1-i) problems: bergomi vanilla, BS with div, American digit, callable bond
-        j-1-ii) harmonize use/concept of continuation value
-        j-1-iii) implement
-    j-2) Ask for help / advice from ChatGPT on how to do the above
 
-------------------------------------------------------------
-Request to chat gpt about the paper: (not done yet)
+- Test LBFGS for graphs:
+    - If it works, implement a mixed precision version
+    - Understand the logic of non monotone Armijo
+        - Why no 3rd order approx in non monotone
+        - Why called non monotone
+    - Add implementation of -y
+    - Test HZ
+    - Test in FP32 or FP64
+
+- Distribution
+    - test on hint distribution:
+        - eager mode first
+        - graph mode to check if it works
+    - test on bellman equation (that might still not work since the new code)
+    - launch a long training and check is distribution = MC distrib
+
+- ES and actor:
+    - implement and test (various mode of actor)
+
+- Review my paper
+Request to chat gpt about the paper:
 I will rewrite a bit the better later. The concept is that my work is more generic that for just the example of hedging in finance.
 What I think is new in the approach includes:
 a) The usage of very small discretization for the evaluation of expectation in bellman equation. Generically possible if there is a model for the universe (empirical or theoretical) for short time evolution because the error is proportion to the time step. This avoids freezing gradients as in some other RL approaches. (I never saw such an approach)
 b) A simple representation of the distribution, without the need to ensure monotonicity. (I read some papers that imposed monotonicity via complicated things)
 Do you think that the above items are indeed new? Do you think they can be useful for other RL problems, outside or in the field of finance?
 Can you find references of articles for comparison?
+
+------------------------------------------------------------
+
+- GPU:
+    - try fixing the GPU one more time: https://www.crazywebstudio.co.th/blog/how-to-solve-code-43-nvidia-gtx10xx-or-rtx20xx-gpu-problem/)
+    - test speed (graph) and convergence (impact of different operation results)
+    - refactor the train method into a tf_function (otherwise perf loss 10x-100x)
+
+- Integrate and test the bandit adaptive version of lbfgs
+
+- review my prior work on martingale
+    - think about how to make a more generic implementation:
+        - problems: bergomi vanilla, BS with div, American digit, callable bond
+        - harmonize use/concept of continuation value
+        - implement (harmonized + bandit ready)
+    - Ask for help / advice from ChatGPT on how to do the above (directly reading my paper)
+
+- Test gnlm (but param need to be fine-tune, very slow as is). If it works, do a version for graphs
+- Try the agent mode of chat gpt (later)
+- Try the cloud computing
+- Build a word document to summarize what I did to create the repo, commit, push, how to use github, use the agent, use cloud computing via github
