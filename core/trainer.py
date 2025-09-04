@@ -134,12 +134,12 @@ class DistributionTrainer:
             losses = []
             if full_batch:
                 self._batch = None
-                losses.append(opt.run())
+                losses.append(opt.step())
             else:
                 perm = tf.random.shuffle(tf.range(N))
                 for start in range(0, N, cfg.batch_size):
                     self._batch = perm[start:min(start + cfg.batch_size, N)]
-                    losses.append(opt.run())
+                    losses.append(opt.step())
 
             if hot.c: self.chart(t=np.array([0, universe.T - universe.h]), show_chart=cfg.show_chart)
 

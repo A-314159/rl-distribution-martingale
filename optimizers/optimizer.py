@@ -4,7 +4,7 @@ from tensorflow import keras
 from optimizers.gnlm import GaussNewtonLM
 from optimizers.lbfgs_tfp import LBFGS_TFP
 from optimizers.lbfgs_mascia import LBFGS_M
-from optimizers.lbfgs_python import LBFGS_PYTHON
+from optimizers.lbfgs_graph import LBFGS_GRAPH
 from utilities.tensorflow_config import tf_compile, LOW, HIGH, SENSITIVE_CALC
 
 
@@ -41,13 +41,13 @@ def function_factory(model, f):
 
 
 class Optimizer:
-    def __init__(self, cfg, function, model):
+    def __init__(self, cfg, function, model, iter_lbfgs=1):
         name = cfg.optimizer.lower()
         self.model = model
         self.function = function
         self.require_full_batch = False
 
-        run = self.gd  # gd as in gradient descent
+        step = self.keras_step  # gd as in gradient descent
         if name == "adam":
             opt = keras.optimizers.Adam(cfg.lr)
         elif name == "sgd":
@@ -56,25 +56,26 @@ class Optimizer:
             opt = keras.optimizers.RMSprop(cfg.lr)
         elif name in ("gn", "lm"):
             opt = GaussNewtonLM(damping=cfg.gn_damping, max_iters=cfg.gn_iters, verbose=cfg.gn_verbose)
-            run = self.gn  # gn as in Gauss-Newton
+            step = self.gn_step  # gn as in Gauss-Newton
         elif name == "lbfgs_tfp":
             opt = LBFGS_TFP(max_iters=cfg.lbfgs_iters, tol=cfg.lbfgs_tol, verbose=cfg.lbfgs_verbose)
-            run = self.gn  # reuse the same closure-based path
+            step = self.gn_step  # reuse the same closure-based path
             self.require_full_batch = True
-        elif name == "lbfgs_python":
-            opt = LBFGS_PYTHON(max_iters=cfg.lbfgs_iters, tol=cfg.lbfgs_tol, verbose=cfg.lbfgs_verbose)
-            run = self.gn  # reuse the same closure-based path
+        elif name == "lbfgs_graph":
+            loss_and_grad = self.make_loss_and_grad()
+            opt = LBFGS_GRAPH(loss_and_grad, model.trainable_variables,
+                              dtype=tf.float32,
+                              opt_dtype=tf.float64,
+                              debug_checks=True)
+
+            step = opt.step(tf.constant(iter_lbfgs, tf.int32))
             self.require_full_batch = True
-        elif name == "lbfgs_m":
-            raise Exception('Integration of lbfgs_m not fully done.')
-            func = function_factory(model, self._loss)
-            opt = LBFGS_M(f=func, x_list=model.trainable_variables)
         else:
             raise Exception('Optimizer %s is not implemented' % name)
 
         self.opt = opt
         self.kind = name
-        self.run = run
+        self.step = step
 
     @tf_compile
     def _loss(self):
@@ -82,7 +83,7 @@ class Optimizer:
         return tf.cast(0.5 * tf.reduce_mean(tf.square(r)), HIGH)
 
     @tf_compile
-    def gd(self):
+    def keras_step(self):
         with tf.GradientTape() as tape:
             loss = self._loss()
         grads = tape.gradient(loss, self.model.trainable_variables)
@@ -90,9 +91,28 @@ class Optimizer:
         return float(loss.numpy())
 
     @tf_compile
-    def gn(self):
+    def gn_step(self):
         try:
             self.opt.minimize(self.function, self.model.trainable_variables)
         except AttributeError:
             raise Exception('Wrong usage of %s minimizer' % self.kind)
         return self._loss().numpy()
+
+    @tf_compile
+    def make_loss_and_grad(self):
+
+        def loss_and_grad(x_list, need_gradient: tf.Tensor):
+            def with_grad():
+                with tf.GradientTape() as tape:
+                    tape.watch(x_list)
+                    f = self._loss()
+                g = tape.gradient(f, x_list)
+                return f, g
+
+            def no_grad():
+                f = self._loss()
+                return f, None
+
+            return tf.cond(need_gradient, with_grad, no_grad)
+
+        return loss_and_grad
