@@ -11,7 +11,7 @@ if __name__ == "__main__":
     #
     # Optional, it does not need to be run each time. (Only when the code needs to be checked)
     # ----------------------------------------------------
-    scan = True
+    scan = False
     if os.environ.get("TRAIN_SKIP_SCAN") == "0" or scan:
         print("🔍 Running TensorFlow static scanner...")
         issues = run_scan(

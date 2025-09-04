@@ -22,20 +22,21 @@ import matplotlib.pyplot as plt
 from itertools import product
 
 
-
 class DistributionTrainer:
     def __init__(self, universe: UniverseBS, sampler_cfg: SamplerConfig, train_cfg: TrainConfig, actor: Actor):
         self.universe, self.sampler_cfg, self.train_cfg = universe, sampler_cfg, train_cfg
         self.data, self.model, self.actor = None, None, actor
 
         # private
-        self._beta = self._batch = None
+        self._beta = 0
+        self._batch = None
 
     def build(self, reload_model=False):
 
         parent = family(self.sampler_cfg, self.universe)
         self.data = expand_family(parent, self.universe)
-        self.data = cast_data_low(self.data, no_cast_keys=['t', 'sqrt_tau', 'dS', 'pv_kids', 'Y_hint'])
+        # warning: below no fully test yet as we ran on FP64
+        cast_data_low(self.data, no_cast_keys=['t', 'sqrt_tau', 'dS', 'pv_kids', 'Y_hint'])
 
         # Model + adapt norm
         self.model = distribution_critic(4, self.train_cfg.hidden, self.train_cfg.activation)
@@ -51,7 +52,7 @@ class DistributionTrainer:
 
         return self.model
 
-    def residuals_fn(self, data, detailed=False):
+    def make_errors_function(self, data, detailed=False):
         universe = self.universe
 
         @tf_compile
@@ -123,7 +124,7 @@ class DistributionTrainer:
         to_csv(csv_path, "w", ["epoch", "elapsed_sec", "rmse_loss", "beta_blending"])
         model, universe, cfg, data = self.model, self.universe, self.train_cfg, self.data
 
-        opt = Optimizer(cfg, model, self.residuals_fn(data))
+        opt = Optimizer(cfg, model, self.make_errors_function(data))
 
         full_batch = opt.require_full_batch or cfg.full_batch
         epoch, t0, hot, N = 0, time.time(), HotKeys(), int(data["t"].shape[0])
@@ -172,7 +173,7 @@ class DistributionTrainer:
         mums = family(self.sampler_cfg, self.universe, txy={'t': _t, 'x': _x, 'y': _y})
         families = expand_family(mums, self.universe)
         self._batch = None
-        res_fn = self.residuals_fn(families, detailed=True)
+        res_fn = self.make_errors_function(families, detailed=True)
         e, F, Y = res_fn()
         e = e.numpy().reshape(t.size, x.size, y.size)
         F = F.numpy().reshape(t.size, x.size, y.size)

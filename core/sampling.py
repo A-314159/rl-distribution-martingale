@@ -89,7 +89,7 @@ def family(cfg: SamplerConfig, u, txy=None) -> dict:
     # -----------------------------
     # prepare hint for the distribution
     # -----------------------------
-    Y_hint = cdf(tf.cast(tf.cast((y - y_mu) / y_half), SENSITIVE_CALC))
+    Y_hint = cdf(tf.cast((y - y_mu) / y_half, SENSITIVE_CALC))
 
     # -----------------------------
     # To save memory:
@@ -127,6 +127,6 @@ def expand_family(parents: dict, universe: UniverseBS) -> dict:
 
 
 def cast_data_low(data_dictionary, no_cast_keys):
-    for (k, v) in data_dictionary:
+    for k, v in data_dictionary.items():
         if k not in no_cast_keys:
             if v.dtype in (HIGH, SENSITIVE_CALC): data_dictionary[k] = tf.cast(v, LOW)

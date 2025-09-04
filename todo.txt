@@ -7,13 +7,20 @@
         - Why called non monotone
     - Add implementation of -y
     - Test HZ
-    - Test in FP32 or FP64
+    - Test in FP64
+    - Review precision setups for ML configuration and BFGS
+    (we can run the model in FP32 but compute the loss in FP64,
+    therefore, BFGS should inspect the precision of the loss function rather than the type of the variable)
+    - Test on ML=FP32, Loss=FP64, Opt=FP64
+    - Test on ML=FP32, Loss=FP32, Opt=FP64
+    - Test on ML=FP32, Loss=FP32, Opt=FP32
 
 - Distribution
     - test on hint distribution:
         - eager mode first
         - graph mode to check if it works
     - test on bellman equation (that might still not work since the new code)
+    (KEEP IN MIND THAT BLENDING MIGHT CAUSE BFGS TO FAIL)
     - launch a long training and check is distribution = MC distrib
 
 - ES and actor:

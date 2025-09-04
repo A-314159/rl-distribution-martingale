@@ -3,7 +3,6 @@ import numpy as np
 from tensorflow import keras
 from optimizers.gnlm import GaussNewtonLM
 from optimizers.lbfgs_tfp import LBFGS_TFP
-from optimizers.lbfgs_mascia import LBFGS_M
 from optimizers.lbfgs_graph import LBFGS_GRAPH
 from utilities.tensorflow_config import tf_compile, LOW, HIGH, SENSITIVE_CALC
 
@@ -41,10 +40,10 @@ def function_factory(model, f):
 
 
 class Optimizer:
-    def __init__(self, cfg, function, model, iter_lbfgs=1):
+    def __init__(self, cfg, model, errors, iter_lbfgs=1):
         name = cfg.optimizer.lower()
         self.model = model
-        self.function = function
+        self.errors = errors
         self.require_full_batch = False
 
         step = self.keras_step  # gd as in gradient descent
@@ -63,12 +62,12 @@ class Optimizer:
             self.require_full_batch = True
         elif name == "lbfgs_graph":
             loss_and_grad = self.make_loss_and_grad()
-            opt = LBFGS_GRAPH(loss_and_grad, model.trainable_variables,
-                              dtype=tf.float32,
-                              opt_dtype=tf.float64,
+            opt = LBFGS_GRAPH(loss_and_grad, self.model.trainable_variables,
+                              dtype=HIGH,
+                              opt_dtype=SENSITIVE_CALC,
                               debug_checks=True)
 
-            step = opt.step(tf.constant(iter_lbfgs, tf.int32))
+            step = self.make_step_with_iter(opt,tf.constant(iter_lbfgs, tf.int32))
             self.require_full_batch = True
         else:
             raise Exception('Optimizer %s is not implemented' % name)
@@ -79,7 +78,7 @@ class Optimizer:
 
     @tf_compile
     def _loss(self):
-        r = self.function()
+        r = self.errors()
         return tf.cast(0.5 * tf.reduce_mean(tf.square(r)), HIGH)
 
     @tf_compile
@@ -93,7 +92,7 @@ class Optimizer:
     @tf_compile
     def gn_step(self):
         try:
-            self.opt.minimize(self.function, self.model.trainable_variables)
+            self.opt.minimize(self.errors, self.model.trainable_variables)
         except AttributeError:
             raise Exception('Wrong usage of %s minimizer' % self.kind)
         return self._loss().numpy()
@@ -116,3 +115,11 @@ class Optimizer:
             return tf.cond(need_gradient, with_grad, no_grad)
 
         return loss_and_grad
+
+    @tf_compile
+    def make_step_with_iter(self, opt, iters):
+
+        def step():
+            return opt.step(iters)
+
+        return step
