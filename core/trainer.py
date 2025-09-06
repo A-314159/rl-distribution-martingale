@@ -135,7 +135,8 @@ class DistributionTrainer:
             losses = []
             if full_batch:
                 self._batch = None
-                losses.append(opt.step())
+                r = opt.step()
+                losses.append(r['f'].numpy())
             else:
                 perm = tf.random.shuffle(tf.range(N))
                 for start in range(0, N, cfg.batch_size):
@@ -165,7 +166,7 @@ class DistributionTrainer:
         dy = (y.max() - y.min()) / (N - 1)
 
         tp = tf.keras.backend.floatx()
-        _t, _x, _y = np.meshgrid(t, x, y, indexing='ij')
+        _t, _x, _y = np.meshgrid(np.array(t), x, y, indexing='ij')
         _t = tf.cast(tf.convert_to_tensor(_t.flatten()), tp)
         _x = tf.cast(tf.convert_to_tensor(_x.flatten()), tp)
         _y = tf.cast(tf.convert_to_tensor(_y.flatten()), tp)
@@ -179,8 +180,8 @@ class DistributionTrainer:
         F = F.numpy().reshape(t.size, x.size, y.size)
         T = Y.numpy().reshape(t.size, x.size, y.size)
         mu = families['y_mu'].numpy().reshape(t.size, x.size, y.size)
-        f = np.zeros_like(F)
-        f[1:-1] = (F[2:] - F[:-2]) / dy
+
+        f = (F[:, :, 2:] - F[:, :, :-2]) / dy
 
         lw = [1, 0.5]
         ls = ['-', '-']
@@ -188,19 +189,25 @@ class DistributionTrainer:
         fig.suptitle(' ')
 
         col = np.array([[0, 0], [0, 0]], dtype=object)
-        r_e, r_f, r_F = np.array([np.min(e), np.max(e)]), np.array([0, np.max(f)]), np.array([0, 1])
-        rg = np.array([[r_F, r_f], [r_f, r_e]])
-        for j, i in product(range(len(x)), range(t.size)):
-            #if x[j] < x_min_sampling[i, j, 0] or x[j] > x_max_sampling[i, j, 0]: continue
-            data = np.array([[F[i, j, :], f[i, j, :]], [T[i, j, :], e[i, j, :]]])
-            mu_x = np.array([mu[i, j, 0], mu[i, j, 0]])
-            for r, c in product(range(2), repeat=2):
-                if i == 0:
-                    line, = ax[r, c].plot(y, data[r, c], label='x=%.1f' % (x[j]), linewidth=lw[i], linestyle=ls[i])
-                    col[r, c] = line.get_color()
-                else:
-                    ax[r, c].plot(y, data[r, c], color=col[r, c], linewidth=lw[i], linestyle=ls[i])
-                ax[r, c].plot(mu_x, rg[r, c], color=col[r, c], linestyle='--', linewidth=lw[i])
+        r_e, r_f, r_F = np.array([np.min(e), np.max(e)]), np.array([np.min(f), np.max(f)]), np.array([0, 1])
+        rg = np.array([[r_F, r_f], [r_F, r_e]])
+        _y = [[y, y[1:-1]], [y, y]]
+        data = [[F, f], [T, e]]
+        for r, c in product(range(2), repeat=2):
+
+            for j in range(len(x)):
+                for i in range(len(t)):
+                    #if x[j] < x_min_sampling[i, j, 0] or x[j] > x_max_sampling[i, j, 0]: continue
+
+                    mu_x = np.array([mu[i, j, 0], mu[i, j, 0]])
+                    d = data[r][c][i, j, :]
+                    if i == 0:
+                        line, = ax[r, c].plot(_y[r][c], d, label='x=%.1f' % (x[j]), linewidth=lw[i],
+                                              linestyle=ls[i])
+                        col[r, c] = line.get_color()
+                    else:
+                        ax[r, c].plot(_y[r][c], d, color=col[r, c], linewidth=lw[i], linestyle=ls[i])
+                    ax[r, c].plot(mu_x, rg[r, c], color=col[r, c], linestyle='--', linewidth=lw[i])
 
         titles = np.array([
             [r'Distribution at $t=%.2f$, $t=%0.2f$' % (t[0], t[1]), r'Density at $t=%.2f$, $t=%0.2f$' % (t[0], t[1])],

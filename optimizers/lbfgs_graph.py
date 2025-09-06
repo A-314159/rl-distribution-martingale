@@ -2,6 +2,7 @@ import tensorflow as tf
 from utilities.tensorflow_config import tf_compile, HIGH, SENSITIVE_CALC
 from optimizers.helpers import _dot, _norm
 from optimizers.line_searches import nonmonotone_armijo, hager_zhang
+from optimizers.armijo import armijo_engine
 
 
 # pylint: disable=shadowed-name
@@ -76,60 +77,128 @@ def _debug_assert_list(flag: tf.Tensor, tensors):
 
 
 # ======================== L-BFGS primitives (OPT dtype kernels) ==============
+# noinspection PyShadowingNames
+# pylint: disable=shadowed-name
+@tf_compile
+def _two_loop_opt(S_m, Y_m, mem_size, m_cap, gamma_o, g_m, eps_rho_o):
+    """
+    Two-loop in OPT dtype; returns (direction, used_rho_cap_flag).
+    """
+    g_o = tf.cast(g_m, gamma_o.dtype)
+    S = tf.cast(S_m[:mem_size], g_o.dtype)
+    Y = tf.cast(Y_m[:mem_size], g_o.dtype)
+
+    def _empty():
+        return -g_o, tf.constant(False)
+
+    def _nonempty():
+        alpha_TA = tf.TensorArray(g_o.dtype, size=mem_size, clear_after_read=False)
+        rho_TA   = tf.TensorArray(g_o.dtype, size=mem_size, clear_after_read=False)
+        used_cap = tf.constant(False)
+
+        def bwd_cond(i, _q, _aTA, _rTA, _used):
+            return i >= 0
+
+        def bwd_body(i, q, aTA, rTA, used):
+            si = S[i]; yi = Y[i]
+            sTy = _dot(yi, si)
+            denom = tf.maximum(sTy, eps_rho_o)
+            used = tf.logical_or(used, sTy <= eps_rho_o)  # flag if clamped
+            rho = 1.0 / denom
+            a = rho * _dot(si, q)
+            q = q - a * yi
+            return i - 1, q, aTA.write(i, a), rTA.write(i, rho), used
+
+        _, q, alpha_TA, rho_TA, used_cap = tf.while_loop(
+            bwd_cond, bwd_body,
+            loop_vars=(mem_size - 1, g_o, alpha_TA, rho_TA, used_cap),
+            maximum_iterations=mem_size, parallel_iterations=1
+        )
+
+        r = gamma_o * q
+
+        def fwd_cond(i, _r):
+            return i < mem_size
+
+        def fwd_body(i, r):
+            si = S[i]; yi = Y[i]
+            rho = rho_TA.read(i)
+            a = alpha_TA.read(i)
+            b = rho * _dot(yi, r)
+            return i + 1, r + si * (a - b)
+
+        _, r = tf.while_loop(
+            fwd_cond, fwd_body, loop_vars=(0, r),
+            maximum_iterations=mem_size, parallel_iterations=1
+        )
+        return r, used_cap
+
+    return tf.cond(mem_size > 0, _nonempty, _empty)
+
 
 @tf_compile
-def _two_loop_opt(S_m, Y_m, mem_size, gamma_o, g_m, eps_div_o):
+def _two_loop_opt_old(S_m, Y_m, mem_size, m_cap, gamma_o, g_m, eps_div_o):
     """
     Two-loop recursion in accumulation dtype.
-    Inputs S_m, Y_m, g_m are model dtype; we cast internally to opt dtype.
+    S_m, Y_m, g_m are model dtype; cast to opt dtype internally.
+    TensorArrays are sized by constant capacity m_cap to keep XLA happy.
     """
     S = tf.cast(S_m, gamma_o.dtype)
     Y = tf.cast(Y_m, gamma_o.dtype)
     g = tf.cast(g_m, gamma_o.dtype)
     eps_div = tf.cast(eps_div_o, gamma_o.dtype)
 
-    alpha_TA = tf.TensorArray(g.dtype, size=mem_size, clear_after_read=False)
-    rho_TA = tf.TensorArray(g.dtype, size=mem_size, clear_after_read=False)
-
-    def bwd_cond(i, _q, _aTA, _rTA):
-        return i >= 0
+    # Early-out: no history → H0 * g
+    def early():
+        return gamma_o * g
 
     # noinspection PyShadowingNames
     # pylint: disable=shadowed-name
-    def bwd_body(i, q, aTA, rTA):
-        si = S[i]
-        yi = Y[i]
-        rho = 1.0 / tf.maximum(_dot(yi, si), eps_div)
-        a = rho * _dot(si, q)
-        q = q - a * yi
-        return i - 1, q, aTA.write(i, a), rTA.write(i, rho)
+    def run():
+        # IMPORTANT: size=m_cap (constant), not mem_size (runtime)
+        alpha_TA = tf.TensorArray(g.dtype, size=m_cap, clear_after_read=False)
+        rho_TA = tf.TensorArray(g.dtype, size=m_cap, clear_after_read=False)
 
-    _, q, alpha_TA, rho_TA = tf.while_loop(
-        bwd_cond, bwd_body,
-        loop_vars=(mem_size - 1, g, alpha_TA, rho_TA),
-        maximum_iterations=mem_size, parallel_iterations=1
-    )
+        def bwd_cond(i, _q, _aTA, _rTA):
+            return i >= 0
 
-    r = gamma_o * q
+        def bwd_body(i, q, aTA, rTA):
+            si = S[i]
+            yi = Y[i]
+            rho = 1.0 / tf.maximum(_dot(yi, si), eps_div)
+            a = rho * _dot(si, q)
+            q = q - a * yi
+            return i - 1, q, aTA.write(i, a), rTA.write(i, rho)
 
-    def fwd_cond(i, _r):
-        return i < mem_size
+        # loop only over valid history [0...mem_size-1]
+        _, q, alpha_TA, rho_TA = tf.while_loop(
+            bwd_cond, bwd_body,
+            loop_vars=(mem_size - 1, g, alpha_TA, rho_TA),
+            maximum_iterations=m_cap,  # safe upper bound (won't exceed mem_size)
+            parallel_iterations=1
+        )
 
-    # noinspection PyShadowingNames
-    # pylint: disable=shadowed-name
-    def fwd_body(i, r):
-        si = S[i]
-        yi = Y[i]
-        rho = rho_TA.read(i)
-        a = alpha_TA.read(i)
-        b = rho * _dot(yi, r)
-        return i + 1, r + si * (a - b)
+        r = gamma_o * q
 
-    _, r = tf.while_loop(
-        fwd_cond, fwd_body, loop_vars=(0, r),
-        maximum_iterations=mem_size, parallel_iterations=1
-    )
-    return r  # opt dtype
+        def fwd_cond(i, _r):
+            return i < mem_size
+
+        def fwd_body(i, r):
+            si = S[i]
+            yi = Y[i]
+            rho = rho_TA.read(i)
+            a = alpha_TA.read(i)
+            b = rho * _dot(yi, r)
+            return i + 1, r + si * (a - b)
+
+        _, r = tf.while_loop(
+            fwd_cond, fwd_body, loop_vars=(0, r),
+            maximum_iterations=m_cap,  # safe upper bound
+            parallel_iterations=1
+        )
+        return r
+
+    return tf.cond(mem_size > 0, run, early)
 
 
 @tf_compile
@@ -264,6 +333,8 @@ def _assert_compilation_mode(fn, fn_name="loss_and_grad"):
 
 # ======================= The L-BFGS stepper ==================================
 
+# noinspection PyShadowingNames
+# pylint: disable=shadowed-name
 class LBFGS_GRAPH:
     """
     Initialize once. Call step(K) inside your own @tf.function training loop to advance K iterations.
@@ -276,15 +347,21 @@ class LBFGS_GRAPH:
                  loss_and_grad, x0,
                  m=20,
                  line_search="nonmonotone_armijo",
+                 y_sign_mode="normal",
                  memory_update="fifo",
                  armijo_c1=1e-4, armijo_window=5, backtrack_factor=0.5,
                  max_evals_per_iter=20, wolfe_c2=0.9,
                  powell_damping=True,
                  init_scaling="bb", init_gamma=1.0,
                  eps_curv=1e-12,
-                 dtype=tf.float32,  # model dtype (default fp32)
-                 opt_dtype=None,  # accumulation dtype (None → choose by model dtype)
-                 debug_checks=False):  # runtime finite checks
+                 dtype=tf.float32,           # model dtype (default fp32)
+                 opt_dtype=None,            # accumulation dtype (None → choose by model dtype)
+                 debug_checks=False,        # runtime finite checks
+                 # ---- Armijo engine knobs (defaults preserve current behavior) ----
+                 armijo_use_cubic=False,    # False → geometric; True → safeguarded cubic
+                 armijo_use_wolfe=False,    # False → pure Armijo; True → light curvature check
+                 armijo_step_max=0.0):      # 0.0 → no trust-region cap on ||d||
+        self.y_sign_mode = tf.constant({"normal": 0, "auto": 1}[y_sign_mode], tf.int32)
 
         # dtypes
         self.dtype_model = dtype
@@ -304,7 +381,11 @@ class LBFGS_GRAPH:
         self.eps_curv = tf.constant(eps_curv, self.dtype_opt)
         self.debug_checks = tf.constant(bool(debug_checks), tf.bool)
 
-        # warning: consider if the threshold levels should be dependent on dtype_model or dtype_opt
+        # Armijo policy (opt dtype)
+        self.armijo_use_cubic = tf.constant(bool(armijo_use_cubic), tf.bool)
+        self.armijo_use_wolfe = tf.constant(bool(armijo_use_wolfe), tf.bool)
+        self.armijo_step_max = tf.cast(armijo_step_max, self.dtype_opt)
+
         # gamma clamps chosen by OPT dtype
         if self.dtype_opt == tf.float64:
             lo, hi = 1e-6, 1e6
@@ -321,21 +402,25 @@ class LBFGS_GRAPH:
             eps_q = 1e-16
             tol_alpha = 1e-12
             alpha_floor = 1e-8
+            eps_rho = 1e-24
         elif self.dtype_opt == tf.float32:
             eps_div = 1e-32
             eps_q = 1e-8
             tol_alpha = 1e-8
             alpha_floor = 1e-6
+            eps_rho = 1e-12
         else:  # fp16/bf16 accumulation (uncommon)
             eps_div = 1e-7
             eps_q = 1e-4
             tol_alpha = 1e-4
             alpha_floor = 1e-3
+            eps_rho = 1e-6
 
         self.eps_div = tf.constant(eps_div, self.dtype_opt)
         self.eps_q = tf.constant(eps_q, self.dtype_opt)
         self.tol_alpha = tf.constant(tol_alpha, self.dtype_opt)
         self.alpha_floor = tf.constant(alpha_floor, self.dtype_opt)
+        self.eps_rho = tf.constant(eps_rho, self.dtype_opt)
 
         if callable(loss_and_grad):
             _assert_compilation_mode(loss_and_grad, "loss_and_grad")
@@ -349,7 +434,6 @@ class LBFGS_GRAPH:
             self.assign_from_flat = make_assign_fn(self.var_list)
             x_flat_m = tf.cast(pack(self.var_list), self.dtype_model)
 
-            # Wrap user's loss_and_grad_list(var_list, need_gradient) -> (loss, grads_list)
             @tf_compile
             def _loss_and_grad(x, need_gradient: tf.Tensor):
                 _ = self.assign_from_flat(x)
@@ -370,7 +454,6 @@ class LBFGS_GRAPH:
             self.loss_and_grad = _loss_and_grad
             self.x = tf.Variable(x_flat_m, dtype=self.dtype_model, trainable=False)
         else:
-            # tensor mode; user provided loss_and_grad(x) or loss_and_grad(x, need_grad)
             if callable(loss_and_grad):
                 try:
                     _ = loss_and_grad(tf.convert_to_tensor(x0, self.dtype_model), tf.constant(True))
@@ -430,12 +513,15 @@ class LBFGS_GRAPH:
         self.f_hist = tf.Variable(tf.fill([self.window], tf.cast(self.f, self.dtype_model)), trainable=False)
         self.f_hist_size = tf.Variable(1, dtype=tf.int32, trainable=False)
 
+        # Debug counters
+        self.rho_cap_count = tf.Variable(0, dtype=tf.int32, trainable=False)
+        self.descent_repair_count = tf.Variable(0, dtype=tf.int32, trainable=False)
+
     @tf_compile
     def step(self, iters: tf.Tensor):
         """
         Advance 'iters' iterations. Returns current state and per-iteration history for this call.
         """
-
         max_iters = tf.cast(iters, tf.int32)
 
         f_TA = tf.TensorArray(self.dtype_model, size=max_iters, clear_after_read=False)
@@ -447,32 +533,64 @@ class LBFGS_GRAPH:
         msize_TA = tf.TensorArray(tf.int32, size=max_iters, clear_after_read=False)
         # noinspection SpellCheckingInspection
         qual_TA = tf.TensorArray(self.dtype_model, size=max_iters, clear_after_read=False)
+        # diagnostics
+        damped_TA = tf.TensorArray(tf.int32, size=max_iters, clear_after_read=False)
+        flipped_TA = tf.TensorArray(tf.int32, size=max_iters, clear_after_read=False)
+        angle_TA = tf.TensorArray(self.dtype_opt, size=max_iters, clear_after_read=False)
 
-        def cond(i, _fTA, _gTA, _aTA, _eTA, _mTA, _qTA):
+        def cond(i, *_):
             return i < max_iters
 
-        def body(i, fTA, gTA, aTA, eTA, mTA, qTA):
+        def body(i, fTA, gTA, aTA, eTA, mTA, qTA, dampTA, flipTA, angTA):
             gamma_o = _initial_gamma_opt(self.gamma_mode, self.gamma_init,
                                          self.S, self.Y, self.mem_size, self.g, self.d_prev,
                                          self.gam_lo, self.gam_hi, self.eps_div)
 
-            d_o = -_two_loop_opt(self.S[:self.mem_size], self.Y[:self.mem_size],
-                                 self.mem_size, gamma_o, self.g, self.eps_div)
+            d_o, used_rho_cap = _two_loop_opt(self.S, self.Y,
+                                              self.mem_size, self.m, gamma_o, self.g, self.eps_rho)
 
-            # If the two-loop produced any non-finite, fall back to steepest descent (opt dtype)
+            # Fall back to steepest descent if non-finite
             all_finite_d = tf.reduce_all(tf.math.is_finite(d_o))
             d_o = tf.cond(all_finite_d, lambda: d_o, lambda: -tf.cast(self.g, self.dtype_opt))
 
-            # Debug: direction must be finite
+            # Count rho clamps
+            self.rho_cap_count.assign_add(tf.cast(used_rho_cap, tf.int32))
+
+            # Force descent if g^T d >= -tau
+            g_o = tf.cast(self.g, self.dtype_opt)
+            gTd_o = _dot(g_o, d_o)
+            g2_o = tf.maximum(_dot(g_o, g_o), self.eps_q)
+            tau_o = tf.cast(10.0, self.dtype_opt) * self.eps_q
+
+            def _repair():
+                eps_proj = self.eps_q
+                coef = (gTd_o / g2_o) + eps_proj
+                d_new = d_o - coef * g_o
+                return tf.where(g2_o > self.eps_q, d_new, -g_o)
+
+            did_repair = gTd_o >= -tau_o
+            d_o = tf.cond(did_repair, _repair, lambda: d_o)
+            self.descent_repair_count.assign_add(tf.cast(did_repair, tf.int32))
+
             _ = _debug_assert_list(self.debug_checks, [d_o])
 
             alpha0_o = tf.maximum(self.alpha_floor, tf.minimum(tf.cast(1.0, self.dtype_opt), 2.0 * self.alpha_prev))
 
             if self.line_search == "nonmonotone_armijo":
-                alpha_o, f_new_m, g_new_m, evals, backs = nonmonotone_armijo(
+                # === minimal replacement: call the unified Armijo engine ===
+                alpha_o, f_new_m, g_new_m, evals, backs = armijo_engine(
                     self.loss_and_grad, self.x, self.f, self.g, d_o,
                     self.f_hist, self.f_hist_size,
-                    alpha0_o, self.c1, self.bt, self.max_evals
+                    alpha0_o=self.c1*0 + alpha0_o,  # keep dtype flow explicit
+                    c1_o=self.c1,
+                    max_evals=self.max_evals,
+                    window_sz=self.window,                 # non-monotone window
+                    use_cubic=self.armijo_use_cubic,       # default False (geometric)
+                    backtrack_o=self.bt,                   # e.g., 0.5
+                    alamin_o=self.alpha_floor,             # dtype-aware minimum alpha
+                    step_max_o=self.armijo_step_max,       # 0 → no cap
+                    use_wolfe=self.armijo_use_wolfe,       # default False (no curvature check)
+                    wolfe_c2_o=self.c2
                 )
                 evals_or_backs = backs
             else:
@@ -501,7 +619,6 @@ class LBFGS_GRAPH:
                 lambda: (alpha_o, f_new_m, g_new_m)
             )
 
-            # Debug: post-line-search values finite (when not forced into no-move)
             _ = _debug_assert_list(self.debug_checks, [f_new_m, g_new_m])
 
             x_new_m = self.x + tf.cast(alpha_o, self.dtype_model) * tf.cast(d_o, self.dtype_model)
@@ -512,21 +629,61 @@ class LBFGS_GRAPH:
             s_s_m = _dot(s_m, s_m)
             s_norm_m = tf.sqrt(tf.maximum(0., s_s_m))
 
-            # Powell damping in opt, returns opt y; then cast back to model
-            y_used_o = tf.cond(self.powell > 0,
-                               lambda: _powell_damp_with_ss_opt(s_m, y_m, gamma_o, s_s_m, self.gam_lo, self.eps_div),
-                               lambda: tf.cast(y_m, self.dtype_opt))
-            y_used_m = tf.cast(y_used_o, self.dtype_model)
+            # Powell damping in OPT dtype
+            y_damped_o = tf.cond(
+                self.powell > 0,
+                lambda: _powell_damp_with_ss_opt(s_m, y_m, gamma_o, s_s_m, self.gam_lo, self.eps_div),
+                lambda: tf.cast(y_m, self.dtype_opt)
+            )
 
-            # These are re-used by accept+log
-            sTy_used_o = _dot(tf.cast(s_m, self.dtype_opt), y_used_o)
-            y_s_used_o = _dot(y_used_o, y_used_o)
-            y_norm_o = tf.sqrt(tf.maximum(0., y_s_used_o))
+            # Curvature stats (OPT dtype)
+            s_o = tf.cast(s_m, self.dtype_opt)
+            sTy_o = _dot(s_o, y_damped_o)
+            y_s_o = _dot(y_damped_o, y_damped_o)
+            y_norm_o_pre = tf.sqrt(tf.maximum(0., y_s_o))
+            thresh_o = self.eps_curv * tf.cast(s_norm_m, self.dtype_opt) * y_norm_o_pre
+
+            def _use_normal():
+                return y_damped_o, sTy_o, y_norm_o_pre
+
+            def _use_auto():
+                flip = sTy_o < -thresh_o
+                def _flip():
+                    y_neg = -y_damped_o
+                    return y_neg, -sTy_o, y_norm_o_pre
+                def _keep():
+                    return y_damped_o, sTy_o, y_norm_o_pre
+                return tf.cond(flip, _flip, _keep)
+
+            y_used_o, sTy_used_o, y_norm_o = tf.case(
+                pred_fn_pairs=[
+                    (tf.equal(self.y_sign_mode, 0), _use_normal),
+                    (tf.equal(self.y_sign_mode, 1), _use_auto),
+                ],
+                default=_use_normal,
+                exclusive=False
+            )
+
+            # diagnostics
+            flag_damped = tf.cast(self.powell > 0, tf.int32)
+            flip_bool = tf.logical_and(tf.equal(self.y_sign_mode, 1), tf.less(sTy_o, -thresh_o))
+            flag_flipped = tf.cast(flip_bool, tf.int32)
+
+            d_new_o = tf.cast(d_o, self.dtype_opt)
+            d_old_o = tf.cast(self.d_prev, self.dtype_opt)
+            inner = _dot(d_new_o, d_old_o)
+            denom = tf.maximum(_norm(d_new_o) * _norm(d_old_o), self.eps_q)
+            cosine = tf.clip_by_value(inner / denom,
+                                      tf.cast(-1.0, self.dtype_opt),
+                                      tf.cast(1.0, self.dtype_opt))
+            angle_pi = tf.acos(cosine) / tf.constant(3.141592653589793, self.dtype_opt)
+
+            y_used_m = tf.cast(y_used_o, self.dtype_model)
 
             # Accept pair?
             accept = sTy_used_o > self.eps_curv * tf.cast(s_norm_m, self.dtype_opt) * y_norm_o
 
-            # quality metric in opt, store in model
+            # quality metric
             q_new_o = sTy_used_o / tf.maximum(tf.cast(s_norm_m, self.dtype_opt) * y_norm_o, self.eps_q)
             q_new_m = tf.cast(q_new_o, self.dtype_model)
 
@@ -553,24 +710,19 @@ class LBFGS_GRAPH:
             self.alpha_prev.assign(alpha_o)
             self.d_prev.assign(tf.cast(d_o, self.dtype_model))
 
-            # Debug: committed tensors finite
             _ = _debug_assert_list(self.debug_checks, [self.x.read_value(), self.f.read_value(), self.g.read_value()])
 
-            # Update f-history window for Armijo
-            # noinspection SpellCheckingInspection
+            # Update Armijo history window
             def upd_fhist():
                 size = self.f_hist_size
-
                 def not_full():
                     idx = tf.cast(size, tf.int32)
                     self.f_hist.assign(tf.tensor_scatter_nd_update(self.f_hist, [[idx]], [f_new_m]))
                     self.f_hist_size.assign(size + 1)
                     return 0
-
                 def full():
                     self.f_hist.assign(tf.concat([self.f_hist[1:], tf.expand_dims(f_new_m, 0)], axis=0))
                     return 0
-
                 return tf.cond(size < self.window, not_full, full)
 
             tf.cond(tf.constant(True), upd_fhist, lambda: tf.constant(0))
@@ -581,22 +733,29 @@ class LBFGS_GRAPH:
                     aTA.write(i, self.alpha_prev.read_value()),
                     eTA.write(i, evals_or_backs),
                     mTA.write(i, self.mem_size.read_value()),
-                    qTA.write(i, q_new_m))
+                    qTA.write(i, q_new_m),
+                    dampTA.write(i, flag_damped),
+                    flipTA.write(i, flag_flipped),
+                    angTA.write(i, angle_pi))
 
-        # noinspection SpellCheckingInspection
-        _, f_TA, gnorm_TA, alpha_TA, evals_TA, msize_TA, qual_TA = tf.while_loop(
+        (_, f_TA, gnorm_TA, alpha_TA, evals_TA, msize_TA, qual_TA,
+         damped_TA, flipped_TA, angle_TA) = tf.while_loop(
             cond, body,
-            loop_vars=(tf.constant(0, tf.int32), f_TA, gnorm_TA, alpha_TA, evals_TA, msize_TA, qual_TA),
+            loop_vars=(tf.constant(0, tf.int32), f_TA, gnorm_TA, alpha_TA, evals_TA, msize_TA, qual_TA,
+                       damped_TA, flipped_TA, angle_TA),
             maximum_iterations=max_iters, parallel_iterations=1
         )
 
         history = {
             "f": f_TA.stack(),
             "g_norm": gnorm_TA.stack(),
-            "alpha": alpha_TA.stack(),  # opt dtype
+            "alpha": alpha_TA.stack(),          # opt dtype
             "evals_or_backs": evals_TA.stack(),
             "m": msize_TA.stack(),
-            "quality": qual_TA.stack()  # model dtype
+            "quality": qual_TA.stack(),         # model dtype
+            "damped": damped_TA.stack(),        # int32
+            "flipped": flipped_TA.stack(),      # int32
+            "angle_pi": angle_TA.stack(),       # opt dtype
         }
 
         return {

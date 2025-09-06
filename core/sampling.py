@@ -44,7 +44,7 @@ def family(cfg: SamplerConfig, u, txy=None) -> dict:
     # -----------------------------
     if usable_dict:
         t = txy['t']
-        k = tf.cast(t, tf.int32)
+        k = tf.cast(t/h, tf.int32)
     else:
         k = rng.uniform(shape=(N,), minval=0, maxval=u.P, dtype=tf.int32)
     k = tf.cast(k, dtype)
@@ -97,7 +97,7 @@ def family(cfg: SamplerConfig, u, txy=None) -> dict:
     # b) cast to LOW precision variables that will not require HIGH precision.
     # -----------------------------
     return dict(
-        t=t, sqrt_tau=sqrt_tau,
+        t=t, sqrt_tau=sqrt_tau, y_mu=tf.cast(y_mu,LOW),
         x=x, x_hi=tf.cast(x_hi, LOW), x_lo=tf.cast(x_lo, LOW),
         y=y, y_lo=tf.cast(y_lo, LOW), y_hi=tf.cast(y_hi, LOW),
         Y_hint=Y_hint)

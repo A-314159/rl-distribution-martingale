@@ -16,7 +16,7 @@ def bs_call_price(x, d, K):
     :param d: sigma sqrt(tau)
     :return: Black-Scholes price normalized by K
     """
-    d = tf.sqrt(tf.maximum(d, eps))
+    d = tf.maximum(d, eps)
     d1 = (x - tf.math.log(K)) / d + 0.5 * d
     price = tf.exp(x) * cdf(d1) - K * cdf(d1 - d)
     return price
@@ -24,6 +24,6 @@ def bs_call_price(x, d, K):
 
 @tf_compile
 def bs_delta(x, d, K):
-    d = tf.sqrt(tf.maximum(d, eps))
+    d = tf.maximum(d, eps)
     d1 = (x - tf.math.log(K)) / d + 0.5 * d
     return cdf(d1)

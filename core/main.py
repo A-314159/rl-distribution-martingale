@@ -12,7 +12,7 @@ def main():
     folder = secrets.token_urlsafe(16)  # this is to be used to assign a folder name as an experiment token
     folder = "F BS"
     # train config must be _done first to set the data type for sensitive calculation first (no great)
-    c = TrainConfig(optimizer="lbfgs_graph", lr=1e-3,
+    c = TrainConfig(hidden=(8, 8, 8), optimizer="lbfgs_graph", lr=1e-3,
                     batch_size=512, max_epochs=10000, max_time_sec=3600, loss_tol_sqrt=1e-4,
                     model_dir='experiment/' + folder, eval_pairs=[(0, 0.0), (20, 0.0), (40, 0.0)],
                     mc_paths=10000, full_batch=True, show_chart=True, cast_64=True)

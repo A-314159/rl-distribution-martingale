@@ -1,11 +1,29 @@
 ------------------------------------------------------------
 
 - Test LBFGS for graphs:
-    - If it works, implement a mixed precision version
-    - Understand the logic of non monotone Armijo
-        - Why no 3rd order approx in non monotone
-        - Why called non monotone
-    - Add implementation of -y
+    - test toy example with powel or flip y and with hz
+    - If we use step() always with a single iteration, would it simplified the code?
+    - Could you write a detailed latex file that explains (the goal is for me to be able to remember precisely what was done in this chat):
+        - the non-monotone armijo,
+        - the HZ,
+        - the powel damping and fip y,
+        - the geometric or cubic search,
+        - the list of gimmicks such as the ones used to handle negative curvature, division by zero, tiny curvature, non-finite issue
+
+Assume we want to minimize function that is weighted average of two functions g (here g represents a function not the gradient of f) and h:
+f(x) = a g(x) + (1-a) h(x).
+Note that we want to have such blending when the real goal is to minimize h, but it has many local minima, while we have a function g that is easier to minimize (much less local minima) and when we guess that the optimum x for g and h are close.
+Assume that we start the loop on L-BFGS step with a=1, and decrease a down to 0 over the iterations.
+At iteration k, the function is f(x,k) = a(k) g(x) + (1-a(k)) h(x).
+If we use L-BFGS, we run into problem because the memory contains information on the curvature of a different functions.
+One way to address this is to reset the memory whenever a(k) changes, but it might not be very efficient.
+Alternatively, we could keep a memory of the common s and of the changes gradients of of g and h: y_g and y_h.
+Then at iteration k, we can build the new direction by building y(k-m)... y(k) from the current value a(k) and y_g(k-m)... y_g(k) and y_h(k-m)... y_h(k).
+What do think about it? Is it worth the effort? Do you see any other idea?
+
+
+
+
     - Test HZ
     - Test in FP64
     - Review precision setups for ML configuration and BFGS
