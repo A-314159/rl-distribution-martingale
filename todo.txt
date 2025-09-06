@@ -4,11 +4,17 @@
     - test toy example with powel or flip y and with hz
     - If we use step() always with a single iteration, would it simplified the code?
     - Could you write a detailed latex file that explains (the goal is for me to be able to remember precisely what was done in this chat):
-        - the non-monotone armijo,
+        - the non-monotone armijo, (NMA)
         - the HZ,
-        - the powel damping and fip y,
+        - the powel damping and flip y,
         - the geometric or cubic search,
-        - the list of gimmicks such as the ones used to handle negative curvature, division by zero, tiny curvature, non-finite issue
+        - a comparison of NMA, HZ and flip y
+        - the list of gimmicks such as the ones used to handle negative curvature, division by zero, tiny curvature, non-finite issue, ...
+        - a description of the minimum and correct variant for the blending with an introduction of why we may want to do that (avoid many local minima trap with a nicer function)
+
+
+------------------------------
+CONSIDER THIS BLENDING IDEA, BUT LATER: we need to chnage the loss function to return two gradients, or have two loss functions.
 
 Assume we want to minimize function that is weighted average of two functions g (here g represents a function not the gradient of f) and h:
 f(x) = a g(x) + (1-a) h(x).
@@ -21,6 +27,7 @@ Alternatively, we could keep a memory of the common s and of the changes gradien
 Then at iteration k, we can build the new direction by building y(k-m)... y(k) from the current value a(k) and y_g(k-m)... y_g(k) and y_h(k-m)... y_h(k).
 What do think about it? Is it worth the effort? Do you see any other idea?
 
+-----------------------------
 
 
 
