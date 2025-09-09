@@ -1,8 +1,8 @@
 import tensorflow as tf
 from utilities.tensorflow_config import tf_compile, HIGH, SENSITIVE_CALC
 from optimizers.helpers import _dot, _norm
-from optimizers.line_searches import nonmonotone_armijo, hager_zhang
 from optimizers.armijo import armijo_engine
+from optimizers.hager_zhang import hager_zhang
 
 
 # pylint: disable=shadowed-name
@@ -63,6 +63,68 @@ def make_assign_fn(var_list):
 
 # ======================== Debug helper =======================================
 
+@tf_compile
+def _probe_pre_ls_flagged(flag, f_m, g_m, d_o):
+    def run():
+        one = tf.constant(1, tf.int32)
+        mask = tf.constant(0, tf.int32)
+
+        f_ok = tf.reduce_all(tf.math.is_finite(f_m))
+        g_ok = tf.reduce_all(tf.math.is_finite(g_m))
+        d_ok = tf.reduce_all(tf.math.is_finite(d_o))
+        gTd = _dot(tf.cast(g_m, d_o.dtype), d_o)
+        gTd_ok = tf.reduce_all(tf.math.is_finite(gTd))
+
+        mask |= tf.where(f_ok, 0, one)
+        mask |= tf.where(g_ok, 0, one << 1)
+        mask |= tf.where(d_ok, 0, one << 2)
+        mask |= tf.where(gTd_ok, 0, one << 3)
+        return mask, tf.cast(gTd, d_o.dtype)
+
+    def no_run():
+        return tf.constant(0, tf.int32), tf.zeros([], d_o.dtype)
+
+    return tf.cond(flag, run, no_run)
+
+
+@tf_compile
+def _probe_post_ls_flagged(flag, f_new_m, g_new_m, dtype_o):
+    def run():
+        one = tf.constant(1, tf.int32)
+        mask = tf.constant(0, tf.int32)
+        f_ok = tf.reduce_all(tf.math.is_finite(f_new_m))
+        g_ok = tf.reduce_all(tf.math.is_finite(g_new_m))
+        mask |= tf.where(f_ok, 0, one)
+        mask |= tf.where(g_ok, 0, one << 1)
+        return mask
+
+    def no_run():
+        return tf.constant(0, tf.int32)
+
+    return tf.cond(flag, run, no_run)
+
+
+@tf_compile
+def _probe_curvature_flagged(flag, s_m, y_m, sTy_o, q_new_o):
+    def run():
+        one = tf.constant(1, tf.int32)
+        mask = tf.constant(0, tf.int32)
+        s_ok = tf.reduce_all(tf.math.is_finite(s_m))
+        y_ok = tf.reduce_all(tf.math.is_finite(y_m))
+        sTy_ok = tf.reduce_all(tf.math.is_finite(sTy_o))
+        q_ok = tf.reduce_all(tf.math.is_finite(q_new_o))
+        mask |= tf.where(s_ok, 0, one)
+        mask |= tf.where(y_ok, 0, one << 1)
+        mask |= tf.where(sTy_ok, 0, one << 2)
+        mask |= tf.where(q_ok, 0, one << 3)
+        return mask
+
+    def no_run():
+        return tf.constant(0, tf.int32)
+
+    return tf.cond(flag, run, no_run)
+
+
 # noinspection SpellCheckingInspection
 @tf_compile
 def _debug_assert_list(flag: tf.Tensor, tensors):
@@ -93,14 +155,15 @@ def _two_loop_opt(S_m, Y_m, mem_size, m_cap, gamma_o, g_m, eps_rho_o):
 
     def _nonempty():
         alpha_TA = tf.TensorArray(g_o.dtype, size=mem_size, clear_after_read=False)
-        rho_TA   = tf.TensorArray(g_o.dtype, size=mem_size, clear_after_read=False)
+        rho_TA = tf.TensorArray(g_o.dtype, size=mem_size, clear_after_read=False)
         used_cap = tf.constant(False)
 
         def bwd_cond(i, _q, _aTA, _rTA, _used):
             return i >= 0
 
         def bwd_body(i, q, aTA, rTA, used):
-            si = S[i]; yi = Y[i]
+            si = S[i]
+            yi = Y[i]
             sTy = _dot(yi, si)
             denom = tf.maximum(sTy, eps_rho_o)
             used = tf.logical_or(used, sTy <= eps_rho_o)  # flag if clamped
@@ -121,7 +184,8 @@ def _two_loop_opt(S_m, Y_m, mem_size, m_cap, gamma_o, g_m, eps_rho_o):
             return i < mem_size
 
         def fwd_body(i, r):
-            si = S[i]; yi = Y[i]
+            si = S[i]
+            yi = Y[i]
             rho = rho_TA.read(i)
             a = alpha_TA.read(i)
             b = rho * _dot(yi, r)
@@ -137,71 +201,6 @@ def _two_loop_opt(S_m, Y_m, mem_size, m_cap, gamma_o, g_m, eps_rho_o):
 
 
 @tf_compile
-def _two_loop_opt_old(S_m, Y_m, mem_size, m_cap, gamma_o, g_m, eps_div_o):
-    """
-    Two-loop recursion in accumulation dtype.
-    S_m, Y_m, g_m are model dtype; cast to opt dtype internally.
-    TensorArrays are sized by constant capacity m_cap to keep XLA happy.
-    """
-    S = tf.cast(S_m, gamma_o.dtype)
-    Y = tf.cast(Y_m, gamma_o.dtype)
-    g = tf.cast(g_m, gamma_o.dtype)
-    eps_div = tf.cast(eps_div_o, gamma_o.dtype)
-
-    # Early-out: no history → H0 * g
-    def early():
-        return gamma_o * g
-
-    # noinspection PyShadowingNames
-    # pylint: disable=shadowed-name
-    def run():
-        # IMPORTANT: size=m_cap (constant), not mem_size (runtime)
-        alpha_TA = tf.TensorArray(g.dtype, size=m_cap, clear_after_read=False)
-        rho_TA = tf.TensorArray(g.dtype, size=m_cap, clear_after_read=False)
-
-        def bwd_cond(i, _q, _aTA, _rTA):
-            return i >= 0
-
-        def bwd_body(i, q, aTA, rTA):
-            si = S[i]
-            yi = Y[i]
-            rho = 1.0 / tf.maximum(_dot(yi, si), eps_div)
-            a = rho * _dot(si, q)
-            q = q - a * yi
-            return i - 1, q, aTA.write(i, a), rTA.write(i, rho)
-
-        # loop only over valid history [0...mem_size-1]
-        _, q, alpha_TA, rho_TA = tf.while_loop(
-            bwd_cond, bwd_body,
-            loop_vars=(mem_size - 1, g, alpha_TA, rho_TA),
-            maximum_iterations=m_cap,  # safe upper bound (won't exceed mem_size)
-            parallel_iterations=1
-        )
-
-        r = gamma_o * q
-
-        def fwd_cond(i, _r):
-            return i < mem_size
-
-        def fwd_body(i, r):
-            si = S[i]
-            yi = Y[i]
-            rho = rho_TA.read(i)
-            a = alpha_TA.read(i)
-            b = rho * _dot(yi, r)
-            return i + 1, r + si * (a - b)
-
-        _, r = tf.while_loop(
-            fwd_cond, fwd_body, loop_vars=(0, r),
-            maximum_iterations=m_cap,  # safe upper bound
-            parallel_iterations=1
-        )
-        return r
-
-    return tf.cond(mem_size > 0, run, early)
-
-
-@tf_compile
 def _initial_gamma_opt(mode_code, init_gamma_o, S_m, Y_m, mem_size, g_m, d_prev_m, gam_lo_o, gam_hi_o, eps_div_o):
     S = tf.cast(S_m, init_gamma_o.dtype)
     Y = tf.cast(Y_m, init_gamma_o.dtype)
@@ -214,7 +213,7 @@ def _initial_gamma_opt(mode_code, init_gamma_o, S_m, Y_m, mem_size, g_m, d_prev_
     def const():
         return tf.clip_by_value(init_gamma_o, gam_lo, gam_hi)
 
-    def bb():
+    def barzilai_borwein():  # classical choice of gamma
         idx = mem_size - 1
         sL, yL = S[idx], Y[idx]
         yTy = _dot(yL, yL)
@@ -226,17 +225,19 @@ def _initial_gamma_opt(mode_code, init_gamma_o, S_m, Y_m, mem_size, g_m, d_prev_
     # noinspection PyShadowingNames
     # pylint: disable=shadowed-name
     # noinspection SpellCheckingInspection
-    def dmatch():
+    def direction_based():  # to be tested: use the last direction to set gamma
         gTd = _dot(g, d_prev)
         g2 = _dot(g, g)
         gam = -gTd / tf.maximum(g2, eps_div)
-        return tf.clip_by_value(gam, gam_lo, gam_hi)
+        gam = tf.clip_by_value(gam, gam_lo, gam_hi)
+        gam = tf.where(tf.math.is_finite(gam), gam, tf.ones_like(gam))
+        return gam
 
     return tf.case(
         pred_fn_pairs=[
             (tf.equal(mode_code, 0), const),
-            (tf.logical_and(tf.equal(mode_code, 1), mem_size > 0), bb),
-            (tf.logical_and(tf.equal(mode_code, 2), _norm(d_prev) > 0.0), dmatch),
+            (tf.logical_and(tf.equal(mode_code, 1), mem_size > 0), barzilai_borwein),
+            (tf.logical_and(tf.equal(mode_code, 2), _norm(d_prev) > 0.0), direction_based),
         ],
         default=const, exclusive=False
     )
@@ -332,35 +333,37 @@ def _assert_compilation_mode(fn, fn_name="loss_and_grad"):
 
 
 # ======================= The L-BFGS stepper ==================================
-
 # noinspection PyShadowingNames
 # pylint: disable=shadowed-name
 class LBFGS_GRAPH:
     """
     Initialize once. Call step(K) inside your own @tf.function training loop to advance K iterations.
     Supports:
-      - line_search: "nonmonotone_armijo" or "hager_zhang"
+      - line_search: "armijo" or "hager_zhang"
       - memory_update: "fifo" or "quality_prune"
     """
 
     def __init__(self,
                  loss_and_grad, x0,
-                 m=20,
-                 line_search="nonmonotone_armijo",
+                 memory=20,
+                 line_search="armijo",
                  y_sign_mode="normal",
                  memory_update="fifo",
                  armijo_c1=1e-4, armijo_window=5, backtrack_factor=0.5,
                  max_evals_per_iter=20, wolfe_c2=0.9,
                  powell_damping=True,
-                 init_scaling="bb", init_gamma=1.0,
+                 init_scaling="bb",  # "bb" for classical BB γ; "direction_match" uses last direction; "constant"
+                 init_gamma=1.0,
                  eps_curv=1e-12,
-                 dtype=tf.float32,           # model dtype (default fp32)
-                 opt_dtype=None,            # accumulation dtype (None → choose by model dtype)
-                 debug_checks=False,        # runtime finite checks
+                 dtype=tf.float32,      # model dtype (default fp32)
+                 opt_dtype=None,        # accumulation dtype (None → choose by model dtype)
+                 debug_checks=False,    # runtime finite checks
                  # ---- Armijo engine knobs (defaults preserve current behavior) ----
-                 armijo_use_cubic=False,    # False → geometric; True → safeguarded cubic
-                 armijo_use_wolfe=False,    # False → pure Armijo; True → light curvature check
-                 armijo_step_max=0.0):      # 0.0 → no trust-region cap on ||d||
+                 armijo_use_cubic=False,   # False → geometric; True → safeguarded cubic
+                 armijo_use_wolfe=False,   # False → pure Armijo; True → light curvature check
+                 armijo_step_max=0.0,      # 0.0 → no trust-region cap on ||d||
+                 stall_reset_K=2):
+
         self.y_sign_mode = tf.constant({"normal": 0, "auto": 1}[y_sign_mode], tf.int32)
 
         # dtypes
@@ -384,7 +387,7 @@ class LBFGS_GRAPH:
         # Armijo policy (opt dtype)
         self.armijo_use_cubic = tf.constant(bool(armijo_use_cubic), tf.bool)
         self.armijo_use_wolfe = tf.constant(bool(armijo_use_wolfe), tf.bool)
-        self.armijo_step_max = tf.cast(armijo_step_max, self.dtype_opt)
+        self.armijo_max_norm_d = tf.cast(armijo_step_max, self.dtype_opt)
 
         # gamma clamps chosen by OPT dtype
         if self.dtype_opt == tf.float64:
@@ -500,7 +503,7 @@ class LBFGS_GRAPH:
 
         # Memory (MODEL dtype storage for bandwidth)
         n = tf.shape(self.x)[0]
-        self.m = tf.constant(int(m), tf.int32)
+        self.m = tf.constant(int(memory), tf.int32)
         self.S = tf.Variable(tf.zeros([self.m, n], dtype=self.dtype_model), trainable=False)
         self.Y = tf.Variable(tf.zeros([self.m, n], dtype=self.dtype_model), trainable=False)
         self.mem_size = tf.Variable(0, dtype=tf.int32, trainable=False)
@@ -517,6 +520,14 @@ class LBFGS_GRAPH:
         self.rho_cap_count = tf.Variable(0, dtype=tf.int32, trainable=False)
         self.descent_repair_count = tf.Variable(0, dtype=tf.int32, trainable=False)
 
+        # --- α=0 stall guard knobs/state ---
+        self.stall_reset_K = tf.constant(int(stall_reset_K), tf.int32)
+        self.zero_alpha_streak = tf.Variable(0, dtype=tf.int32, trainable=False)
+
+        # --- NEW: lifetime reset counters ---
+        self.alpha_zero_resets = tf.Variable(0, dtype=tf.int32, trainable=False)
+        self.nonfinite_resets = tf.Variable(0, dtype=tf.int32, trainable=False)
+
     @tf_compile
     def step(self, iters: tf.Tensor):
         """
@@ -525,82 +536,136 @@ class LBFGS_GRAPH:
         max_iters = tf.cast(iters, tf.int32)
 
         f_TA = tf.TensorArray(self.dtype_model, size=max_iters, clear_after_read=False)
-        # noinspection SpellCheckingInspection
         gnorm_TA = tf.TensorArray(self.dtype_model, size=max_iters, clear_after_read=False)
         alpha_TA = tf.TensorArray(self.dtype_opt, size=max_iters, clear_after_read=False)
         evals_TA = tf.TensorArray(tf.int32, size=max_iters, clear_after_read=False)
-        # noinspection SpellCheckingInspection
         msize_TA = tf.TensorArray(tf.int32, size=max_iters, clear_after_read=False)
-        # noinspection SpellCheckingInspection
         qual_TA = tf.TensorArray(self.dtype_model, size=max_iters, clear_after_read=False)
         # diagnostics
         damped_TA = tf.TensorArray(tf.int32, size=max_iters, clear_after_read=False)
         flipped_TA = tf.TensorArray(tf.int32, size=max_iters, clear_after_read=False)
         angle_TA = tf.TensorArray(self.dtype_opt, size=max_iters, clear_after_read=False)
+        # NEW: per-iteration reset flags
+        stallreset_TA = tf.TensorArray(tf.int32, size=max_iters, clear_after_read=False)
+        nfreset_TA = tf.TensorArray(tf.int32, size=max_iters, clear_after_read=False)
 
         def cond(i, *_):
             return i < max_iters
 
-        def body(i, fTA, gTA, aTA, eTA, mTA, qTA, dampTA, flipTA, angTA):
+        def body(i, fTA, gTA, aTA, eTA, mTA, qTA, dampTA, flipTA, angTA, stallTA, nfTA):
+            # ----------------------------------------------------------------------
+            # Set gamma either by Barzilai_Borwein or last-direction-based and clamp
+            # ----------------------------------------------------------------------
             gamma_o = _initial_gamma_opt(self.gamma_mode, self.gamma_init,
                                          self.S, self.Y, self.mem_size, self.g, self.d_prev,
                                          self.gam_lo, self.gam_hi, self.eps_div)
 
+            # ----------------------------------------------------------------------
+            # Set the direction by two-loop L-BFGS using existing pairs (s,y) and clap rho is needed
+            # ----------------------------------------------------------------------
             d_o, used_rho_cap = _two_loop_opt(self.S, self.Y,
                                               self.mem_size, self.m, gamma_o, self.g, self.eps_rho)
+            self.rho_cap_count.assign_add(tf.cast(used_rho_cap, tf.int32))
 
-            # Fall back to steepest descent if non-finite
+            # ----------------------------------------------------------------------
+            # Fall back to steepest descent if d is non-finite
+            # ----------------------------------------------------------------------
             all_finite_d = tf.reduce_all(tf.math.is_finite(d_o))
             d_o = tf.cond(all_finite_d, lambda: d_o, lambda: -tf.cast(self.g, self.dtype_opt))
 
-            # Count rho clamps
-            self.rho_cap_count.assign_add(tf.cast(used_rho_cap, tf.int32))
-
-            # Force descent if g^T d >= -tau
+            # ----------------------------------------------------------------------
+            # Repair direction if g^T d >= -tau
+            # ----------------------------------------------------------------------
             g_o = tf.cast(self.g, self.dtype_opt)
             gTd_o = _dot(g_o, d_o)
-            g2_o = tf.maximum(_dot(g_o, g_o), self.eps_q)
+            g2_o = _dot(g_o, g_o)
             tau_o = tf.cast(10.0, self.dtype_opt) * self.eps_q
 
-            def _repair():
+            def _make_descent_direction():
                 eps_proj = self.eps_q
                 coef = (gTd_o / g2_o) + eps_proj
                 d_new = d_o - coef * g_o
                 return tf.where(g2_o > self.eps_q, d_new, -g_o)
 
-            did_repair = gTd_o >= -tau_o
-            d_o = tf.cond(did_repair, _repair, lambda: d_o)
-            self.descent_repair_count.assign_add(tf.cast(did_repair, tf.int32))
-
+            repair_direction = gTd_o >= -tau_o
+            d_o = tf.cond(repair_direction, _make_descent_direction, lambda: d_o)
+            self.descent_repair_count.assign_add(tf.cast(repair_direction, tf.int32))
             _ = _debug_assert_list(self.debug_checks, [d_o])
 
-            alpha0_o = tf.maximum(self.alpha_floor, tf.minimum(tf.cast(1.0, self.dtype_opt), 2.0 * self.alpha_prev))
+            # ----------------------------------------------------------------------
+            # Check for inf/nan only if debug_checks is True
+            # ----------------------------------------------------------------------
+            pre_mask, gTd_dbg = _probe_pre_ls_flagged(self.debug_checks, self.f, self.g, d_o)
+            tf.cond(self.debug_checks, lambda: tf.print("[dbg pre-LS] mask=", pre_mask, " g·d=", gTd_dbg), lambda: 0)
 
-            if self.line_search == "nonmonotone_armijo":
-                # === minimal replacement: call the unified Armijo engine ===
+            # ----------------------------------------------------------------------
+            # Perform the line search
+            # with warm start for geometric search (not for cubic search)
+            # ----------------------------------------------------------------------
+            alpha0_o = tf.maximum(self.alpha_floor,
+                                  tf.minimum(tf.cast(1.0, self.dtype_opt), 2.0 * self.alpha_prev))
+
+            # line search
+            if self.line_search == "armijo":
                 alpha_o, f_new_m, g_new_m, evals, backs = armijo_engine(
                     self.loss_and_grad, self.x, self.f, self.g, d_o,
                     self.f_hist, self.f_hist_size,
-                    alpha0_o=self.c1*0 + alpha0_o,  # keep dtype flow explicit
-                    c1_o=self.c1,
-                    max_evals=self.max_evals,
-                    window_sz=self.window,                 # non-monotone window
-                    use_cubic=self.armijo_use_cubic,       # default False (geometric)
-                    backtrack_o=self.bt,                   # e.g., 0.5
-                    alamin_o=self.alpha_floor,             # dtype-aware minimum alpha
-                    step_max_o=self.armijo_step_max,       # 0 → no cap
-                    use_wolfe=self.armijo_use_wolfe,       # default False (no curvature check)
-                    wolfe_c2_o=self.c2
+                    alpha0_o, self.c1, self.max_evals,
+                    self.window, self.armijo_use_cubic,
+                    self.bt, self.tol_alpha,            # tolx
+                    self.armijo_max_norm_d,
+                    self.armijo_use_wolfe, self.c2,
+                    self.eps_div                         # dtype-aware epsilon for alamin guard
                 )
                 evals_or_backs = backs
             else:
                 alpha_o, f_new_m, g_new_m, evals = hager_zhang(
                     self.loss_and_grad, self.x, self.f, self.g, d_o,
-                    alpha0_o, self.c1, self.c2, self.max_evals, self.tol_alpha
+                    alpha0_o, self.c1, self.c2, self.max_evals, self.tol_alpha,
+                    self.eps_div                         # (may be ignored inside HZ)
                 )
                 evals_or_backs = evals
 
-            # Bail if new values are non-finite
+            # ----------------------------------------------------------------------
+            # Track α==0 stalls
+            # ----------------------------------------------------------------------
+            is_zero_alpha = tf.equal(alpha_o, tf.cast(0.0, self.dtype_opt))
+            self.zero_alpha_streak.assign(
+                tf.where(is_zero_alpha, self.zero_alpha_streak + 1, tf.constant(0, tf.int32))
+            )
+
+            def _on_stall():
+                # reset memory
+                self.S.assign(tf.zeros_like(self.S))
+                self.Y.assign(tf.zeros_like(self.Y))
+                self.Q.assign(tf.zeros_like(self.Q))
+                self.mem_size.assign(0)
+                # conservative next warm-start & bias -g
+                self.alpha_prev.assign(self.alpha_floor)
+                self.d_prev.assign(-tf.cast(self.g.read_value(), self.dtype_model))
+                # counters
+                self.zero_alpha_streak.assign(0)
+                self.alpha_zero_resets.assign_add(1)
+                # force α=0 this iter & emit flag
+                return tf.cast(0.0, self.dtype_opt), tf.constant(1, tf.int32)
+
+            alpha_o, stall_flag = tf.cond(
+                self.zero_alpha_streak >= self.stall_reset_K,
+                _on_stall,
+                lambda: (alpha_o, tf.constant(0, tf.int32))
+            )
+
+            # ----------------------------------------------------------------------
+            # Check for inf/nan only if debug_checks is True
+            # ----------------------------------------------------------------------
+            post_mask = _probe_post_ls_flagged(self.debug_checks, f_new_m, g_new_m, d_o.dtype)
+            tf.cond(self.debug_checks, lambda: tf.print("[dbg post-LS] mask=", post_mask), lambda: 0)
+
+            # ----------------------------------------------------------------------
+            # Bail if new values are non-finite / Nan:
+            # Reset memory and keep x constant. This will force to restart with a line search with
+            # a steepest descent direction using the last clean gradient
+            # ----------------------------------------------------------------------
             bad_new = tf.logical_or(
                 tf.logical_not(tf.math.is_finite(f_new_m)),
                 tf.logical_not(tf.reduce_all(tf.math.is_finite(g_new_m)))
@@ -611,38 +676,50 @@ class LBFGS_GRAPH:
                 self.Y.assign(tf.zeros_like(self.Y))
                 self.Q.assign(tf.zeros_like(self.Q))
                 self.mem_size.assign(0)
-                return tf.constant(0.0, self.dtype_opt), self.f.read_value(), self.g.read_value()
+                self.nonfinite_resets.assign_add(1)
+                return tf.constant(0.0, self.dtype_opt), self.f.read_value(), self.g.read_value(), tf.constant(1, tf.int32)
 
-            alpha_o, f_new_m, g_new_m = tf.cond(
+            alpha_o, f_new_m, g_new_m, nf_flag = tf.cond(
                 bad_new,
                 _clear_hist_no_move,
-                lambda: (alpha_o, f_new_m, g_new_m)
+                lambda: (alpha_o, f_new_m, g_new_m, tf.constant(0, tf.int32))
             )
 
+            # ----------------------------------------------------------------------
+            # check for inf/Nan if debugs_checks=True (works whether eager or graph mode)
+            # ----------------------------------------------------------------------
             _ = _debug_assert_list(self.debug_checks, [f_new_m, g_new_m])
 
+            # ----------------------------------------------------------------------
+            # Set the new point
+            # ----------------------------------------------------------------------
             x_new_m = self.x + tf.cast(alpha_o, self.dtype_model) * tf.cast(d_o, self.dtype_model)
             s_m = x_new_m - self.x
             y_m = g_new_m - self.g
 
-            # Precompute once (model dtype)
+            # precompute norms
             s_s_m = _dot(s_m, s_m)
             s_norm_m = tf.sqrt(tf.maximum(0., s_s_m))
 
-            # Powell damping in OPT dtype
+            # ----------------------------------------------------------------------
+            # Powell damping if requested
+            # ----------------------------------------------------------------------
             y_damped_o = tf.cond(
                 self.powell > 0,
                 lambda: _powell_damp_with_ss_opt(s_m, y_m, gamma_o, s_s_m, self.gam_lo, self.eps_div),
                 lambda: tf.cast(y_m, self.dtype_opt)
             )
 
-            # Curvature stats (OPT dtype)
+            # curvature stats
             s_o = tf.cast(s_m, self.dtype_opt)
             sTy_o = _dot(s_o, y_damped_o)
             y_s_o = _dot(y_damped_o, y_damped_o)
             y_norm_o_pre = tf.sqrt(tf.maximum(0., y_s_o))
             thresh_o = self.eps_curv * tf.cast(s_norm_m, self.dtype_opt) * y_norm_o_pre
 
+            # ----------------------------------------------------------------------
+            # Flip y to -y if requested if the curvature condition is not met
+            # ----------------------------------------------------------------------
             def _use_normal():
                 return y_damped_o, sTy_o, y_norm_o_pre
 
@@ -664,7 +741,9 @@ class LBFGS_GRAPH:
                 exclusive=False
             )
 
-            # diagnostics
+            # ----------------------------------------------------------------------
+            # Compute metrics for diagnostic
+            # ----------------------------------------------------------------------
             flag_damped = tf.cast(self.powell > 0, tf.int32)
             flip_bool = tf.logical_and(tf.equal(self.y_sign_mode, 1), tf.less(sTy_o, -thresh_o))
             flag_flipped = tf.cast(flip_bool, tf.int32)
@@ -678,27 +757,34 @@ class LBFGS_GRAPH:
                                       tf.cast(1.0, self.dtype_opt))
             angle_pi = tf.acos(cosine) / tf.constant(3.141592653589793, self.dtype_opt)
 
+            # ----------------------------------------------------------------------
+            # Update the memory of s and y
+            # ----------------------------------------------------------------------
             y_used_m = tf.cast(y_used_o, self.dtype_model)
 
-            # Accept pair?
+            # accept pair?
             accept = sTy_used_o > self.eps_curv * tf.cast(s_norm_m, self.dtype_opt) * y_norm_o
 
-            # quality metric
+            # quality
             q_new_o = sTy_used_o / tf.maximum(tf.cast(s_norm_m, self.dtype_opt) * y_norm_o, self.eps_q)
             q_new_m = tf.cast(q_new_o, self.dtype_model)
+
+            curv_mask = _probe_curvature_flagged(self.debug_checks, s_m, tf.cast(y_used_o, self.dtype_model),
+                                                 sTy_used_o, q_new_o)
+            tf.cond(self.debug_checks, lambda: tf.print("[dbg curvature] mask=", curv_mask,
+                                                        " sTy=", sTy_used_o, " q=", q_new_o), lambda: 0)
 
             def upd_fifo():
                 return _append_fifo_with_q(self.S, self.Y, self.Q, self.mem_size, s_m, y_used_m, q_new_m, self.m)
 
             def upd_qp():
-                return _append_quality_prune_with_q(self.S, self.Y, self.Q, self.mem_size, s_m, y_used_m, q_new_m,
-                                                    self.m)
+                return _append_quality_prune_with_q(self.S, self.Y, self.Q, self.mem_size, s_m, y_used_m, q_new_m, self.m)
 
             S2, Y2, Q2, ms2 = tf.cond(accept,
                                       lambda: (upd_fifo() if self.memory_update == "fifo" else upd_qp()),
                                       lambda: (self.S, self.Y, self.Q, self.mem_size))
 
-            # Commit state
+            # commit state
             self.x.assign(x_new_m)
             self.f.assign(f_new_m)
             self.g.assign(g_new_m)
@@ -710,9 +796,12 @@ class LBFGS_GRAPH:
             self.alpha_prev.assign(alpha_o)
             self.d_prev.assign(tf.cast(d_o, self.dtype_model))
 
+            # ----------------------------------------------------------------------
+            # check for inf/Nan if debugs_checks=True (works whether eager or graph mode)
+            # ----------------------------------------------------------------------
             _ = _debug_assert_list(self.debug_checks, [self.x.read_value(), self.f.read_value(), self.g.read_value()])
 
-            # Update Armijo history window
+            # update Armijo history window
             def upd_fhist():
                 size = self.f_hist_size
                 def not_full():
@@ -736,13 +825,15 @@ class LBFGS_GRAPH:
                     qTA.write(i, q_new_m),
                     dampTA.write(i, flag_damped),
                     flipTA.write(i, flag_flipped),
-                    angTA.write(i, angle_pi))
+                    angTA.write(i, angle_pi),
+                    stallTA.write(i, stall_flag),
+                    nfTA.write(i, nf_flag))
 
         (_, f_TA, gnorm_TA, alpha_TA, evals_TA, msize_TA, qual_TA,
-         damped_TA, flipped_TA, angle_TA) = tf.while_loop(
+         damped_TA, flipped_TA, angle_TA, stall_TA, nf_TA) = tf.while_loop(
             cond, body,
             loop_vars=(tf.constant(0, tf.int32), f_TA, gnorm_TA, alpha_TA, evals_TA, msize_TA, qual_TA,
-                       damped_TA, flipped_TA, angle_TA),
+                       damped_TA, flipped_TA, angle_TA, stallreset_TA, nfreset_TA),
             maximum_iterations=max_iters, parallel_iterations=1
         )
 
@@ -756,6 +847,8 @@ class LBFGS_GRAPH:
             "damped": damped_TA.stack(),        # int32
             "flipped": flipped_TA.stack(),      # int32
             "angle_pi": angle_TA.stack(),       # opt dtype
+            "reset_alpha_stall": stall_TA.stack(),   # int32 flag per iter
+            "reset_nonfinite": nf_TA.stack(),        # int32 flag per iter
         }
 
         return {
@@ -766,5 +859,8 @@ class LBFGS_GRAPH:
             "S": self.S[:self.mem_size],
             "Y": self.Y[:self.mem_size],
             "Q": self.Q[:self.mem_size],
-            "history": history
+            "history": history,
+            # lifetime counters exposed (optional)
+            "alpha_zero_resets": self.alpha_zero_resets.read_value(),
+            "nonfinite_resets": self.nonfinite_resets.read_value(),
         }
