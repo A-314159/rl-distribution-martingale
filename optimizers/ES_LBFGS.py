@@ -36,10 +36,10 @@ def plot_convergence(curve_a: List[Dict[str, Any]], curve_b: List[Dict[str, Any]
     if not skip_a: ta, la = unpack(curve_a)
     tb, lb = unpack(curve_b)
     plt.figure()
-    if not skip_a: plt.plot(ta, la, label='A: autodiff+cubic')
-    plt.plot(tb, lb, label='B: ES+quadratic')
+    if not skip_a: plt.plot(ta, la, label='A: L-BFGS')
+    plt.plot(tb, lb, label='B: L-BFGS with Adam diagonal')
     plt.xlabel('Wall time (s)')
-    plt.ylabel('MSE loss')
+    plt.ylabel('√ mse')
     plt.yscale('log')
     plt.title('Convergence')
     plt.legend();
@@ -67,6 +67,18 @@ def plot_slices(model_a: tf.keras.Model, model_b: tf.keras.Model, a: float = 0.0
     plt.suptitle('Predictions vs Φ at fixed t')
 
 
+def update_H0_from_grad(g, v, beta2, eps, target_med):
+    v = beta2 * v + (1 - beta2) * (g * g)
+    v_hat = v  # bias-correction optional for large t
+    d0 = 1.0 / (np.sqrt(v_hat) + eps)
+    # normalize to match scalar scale
+    med = np.median(d0)
+    if med > 0:
+        d0 *= (target_med / med)
+    # clip for safety
+    d0 = np.clip(d0, 1e-8, 1e+2)
+    return v, d0
+
 # ==========================
 # Target & data
 # ==========================
@@ -92,8 +104,9 @@ def make_dataset(n: int, seed: int = 0, a: float = 0.0, b: float = 1.0) -> Tuple
 
 def build_mlp() -> tf.keras.Model:
     inp = tf.keras.Input(shape=(3,), dtype=tf.float32)
-    h = tf.keras.layers.Dense(16, activation='tanh')(inp)
-    h = tf.keras.layers.Dense(16, activation='tanh')(h)
+    h = tf.keras.layers.Dense(8, activation='tanh')(inp)
+    h = tf.keras.layers.Dense(8, activation='tanh')(h)
+    h = tf.keras.layers.Dense(8, activation='tanh')(h)
     #h = tf.keras.layers.Dense(16, activation='tanh')(h)
     out = tf.keras.layers.Dense(1, activation='sigmoid')(h)
     return tf.keras.Model(inputs=inp, outputs=out)
@@ -145,7 +158,7 @@ class LBFGSMemory:
             self.S.pop(0)
             self.Y.pop(0)
 
-    def two_loop(self, g: np.ndarray, gamma: float) -> np.ndarray:
+    def two_loop(self, g: np.ndarray, gamma: float, d0=None) -> np.ndarray:
         S, Y = self.S, self.Y
         q = g.astype(np.float64).copy()
         alpha, rho = [], []
@@ -155,7 +168,10 @@ class LBFGSMemory:
             a = r * np.dot(s, q)
             alpha.append(a)
             q -= a * y
-        q *= gamma
+        if d0 is None:
+            q *= gamma
+        else:
+            q*=d0
         for (s, y, r, a) in zip(S, Y, reversed(rho), reversed(alpha)):
             b = r * np.dot(y, q)
             q += s * (a - b)
@@ -402,7 +418,7 @@ class LBFGSConfig:
     mem: int = 10
     c1: float = 1e-4
     powell_c: float = 0.2
-    ls_max_steps: int = 2
+    ls_max_steps: int = 4
     alpha_init: float = 1.0
     cub_clip: Tuple[float, float] = (0.1, 2.5)
     quad_clip: Tuple[float, float] = (0.1, 2.5)
@@ -450,10 +466,13 @@ class LBFGSRunner:
         return flat.numpy().astype(np.float64)
 
     # ----- Direction -----
-    def direction(self, g: np.ndarray, gamma: float) -> np.ndarray:
+    def direction(self, g: np.ndarray, gamma: float, d0=None) -> np.ndarray:
         if len(self.mem.S) == 0:
-            return -gamma * g
-        return -self.mem.two_loop(g, gamma)
+            if d0 is None:
+                return -gamma * g
+            else:
+                return -d0*g
+        return -self.mem.two_loop(g, gamma, d0)
 
     # ----- Line search (shared) -----
     def line_search(self, theta: np.ndarray, f0: float, g: np.ndarray, d: np.ndarray,
@@ -515,8 +534,16 @@ class LBFGSRunner:
         print(f"Iter 0: loss={f0:.6f}")
         history.append(dict(iter=0, t=0.0, loss=f0))
         d_prev = None
+
+        # state
+        v = np.zeros_like(theta) # EMA of g^2
+        d0= None
+        beta2, eps = 0.999, 1e-8
+
+        if cfg.adam_diagonal:        v, d0 = update_H0_from_grad(g, v, beta2, eps, gamma)
+        total_ls_iter=0
         for it in range(1, cfg.max_iters + 1):
-            d = self.direction(g, gamma)
+            d = self.direction(g, gamma, d0)
             angle_pi = float('nan')
             if d_prev is not None:
                 nd = np.linalg.norm(d)
@@ -527,6 +554,7 @@ class LBFGSRunner:
             d_prev = d.copy()
             m0 = float(np.dot(g, d))
             alpha, accepted, ls_trace, ls_iter = self.line_search(theta, f0, g, d, mode='autodiff', m0=m0)
+            total_ls_iter+=ls_iter
             theta_next = theta + alpha * d
             self.set_x_tf32(tf.convert_to_tensor(theta_next))
             f_next = self.loss()
@@ -543,22 +571,24 @@ class LBFGSRunner:
                 self.mem.push(s, y_bar)
                 pair_accepted = True
                 gamma = max(float(sTyb / (np.dot(y_bar, y_bar) + 1e-18)), 1e-8)
+                if cfg.adam_diagonal:        v, d0 = update_H0_from_grad(g, v, beta2, eps, gamma)
 
             theta, f0, g = theta_next, f_next, g_next
             t_now = time.perf_counter() - t0
+            sqrt_f=math.sqrt(f_next)
 
-            rec = dict(iter=it, t=t_now, loss=f_next, alpha=alpha, armijo=accepted,
+            rec = dict(iter=it, t=t_now, loss=sqrt_f, alpha=alpha, armijo=accepted,
                        g_norm=float(np.linalg.norm(g)), d_dot_g=float(np.dot(d, g)),
                        sTy=sTy, sTy_bar=sTyb, cos_sy=cos_sy, s_norm=float(np.linalg.norm(s)),
                        ybar_norm=float(np.linalg.norm(y_bar)), mem=len(self.mem.S), gamma=gamma,
                        ls_trace=ls_trace)
             history.append(rec)
-            if it % 1 == 0:
+            if it % 10 == 0:
                 print(
-                    f"Iter {it}: t={t_now:7.3f}s, , angle={angle_pi:.4f}, loss={f_next:.6f}, d.g>0:{m0 > 0}, armijo:{accepted}, alpha={alpha:.3e}, iter={ls_iter}, |g|={rec['g_norm']:.3e}, neg_sTy={sTy < 0}, powel={theta_mix != 1.0}, pair ok:{pair_accepted}, mem={len(self.mem.S)}")
+                    f"Iter {it}: t={t_now:7.3f}s, , angle={angle_pi:.4f}, loss={sqrt_f:.5f}, d.g>0:{m0 > 0}, armijo:{accepted}, alpha={alpha:.3e}, iter={total_ls_iter}, |g|={rec['g_norm']:.3e}, neg_sTy={sTy < 0}, powel={theta_mix != 1.0}, pair ok:{pair_accepted}, mem={len(self.mem.S)}")
 
-            if np.linalg.norm(g) < 1e-6:
-                break
+            #if np.linalg.norm(g) < 1e-6:
+            #    break
         return history
 
     def run_es(self) -> List[Dict[str, Any]]:
@@ -685,12 +715,12 @@ if __name__ == "__main__":
     # Ensure identical initialization
     model_b.set_weights([w.copy() for w in model_a.get_weights()])
 
-    cfg_a = LBFGSConfig(max_iters=80, mem=20, c1=1e-4, powell_c=0.2, ls_max_steps=10,
+    cfg_a = LBFGSConfig(max_iters=2000, mem=20, c1=1e-4, powell_c=0.2, ls_max_steps=10,
                         alpha_init=1.0, cub_clip=(0.1, 2.5), quad_clip=(0.1, 2.5),
                         sigma_es=1e-3, sigma_decay=0.4, sigma_min=1e-8,
                         curvature_cos_tol=1e-1, diag_true_grad=False, adam_diagonal=False)
 
-    cfg_b = LBFGSConfig(max_iters=80, mem=20, c1=1e-4, powell_c=0.2, ls_max_steps=10,
+    cfg_b = LBFGSConfig(max_iters=2000, mem=20, c1=1e-4, powell_c=0.2, ls_max_steps=10,
                         alpha_init=1.0, cub_clip=(0.1, 2.5), quad_clip=(0.1, 2.5),
                         sigma_es=1e-3, sigma_decay=0.4, sigma_min=1e-8,
                         curvature_cos_tol=1e-1, diag_true_grad=False, adam_diagonal=True)
@@ -698,12 +728,12 @@ if __name__ == "__main__":
 
     skip_auto_diff = False
     if not skip_auto_diff:
-        print("\n=== Mode A: Autodiff + Cubic Armijo ===")
+        print("\n=== Mode A: L-BFGS (Armijo cubic) ===")
         runner_a = LBFGSRunner(model_a, X, Y, cfg_a, seed=123)
         hist_a = runner_a.run_autodiff()
         #hist_a = runner_a.run_es()
 
-    print("\n=== Mode B: ES (CRN) + Quadratic Armijo (function-only) ===")
+    print("\n=== Mode B: L-FBGS (Armijo cubic, with Adam diagonal)===")
     runner_b = LBFGSRunner(model_b, X, Y, cfg_b, seed=123)
     #hist_b = runner_b.run_es()
     hist_b = runner_b.run_autodiff()
