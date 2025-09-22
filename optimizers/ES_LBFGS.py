@@ -104,9 +104,9 @@ def make_dataset(n: int, seed: int = 0, a: float = 0.0, b: float = 1.0) -> Tuple
 
 def build_mlp() -> tf.keras.Model:
     inp = tf.keras.Input(shape=(3,), dtype=tf.float32)
-    h = tf.keras.layers.Dense(8, activation='tanh')(inp)
-    h = tf.keras.layers.Dense(8, activation='tanh')(h)
-    h = tf.keras.layers.Dense(8, activation='tanh')(h)
+    h = tf.keras.layers.Dense(16, activation='tanh')(inp)
+    h = tf.keras.layers.Dense(16, activation='tanh')(h)
+    h = tf.keras.layers.Dense(16, activation='tanh')(h)
     #h = tf.keras.layers.Dense(16, activation='tanh')(h)
     out = tf.keras.layers.Dense(1, activation='sigmoid')(h)
     return tf.keras.Model(inputs=inp, outputs=out)
@@ -365,48 +365,7 @@ def should_accept_pair(s: np.ndarray,
     return False  #, sTyb, curv_floor, cos_sy
 
 
-def should_accept_pair_old(
-        s, y_bar, *,
-        gamma: float,
-        armijo_ok: bool,
-        alpha: float,
-        cfg
-) -> bool:
-    # configs (tweak as needed)
-    cos_tol = getattr(cfg, "curvature_cos_tol", 1e-3)  # gate 1
-    s_floor = getattr(cfg, "s_norm_floor", 1e-12)  # gate 2
-    y_floor = getattr(cfg, "y_norm_floor", 1e-12)  # gate 2
-    c_B = getattr(cfg, "curv_rel_B0", 1e-3)  # gate 3
-    rho_min = getattr(cfg, "rho_min", 1e-4)  # gate 4
-    rho_max = getattr(cfg, "rho_max", 0.999)  # gate 4
-    alpha_min = getattr(cfg, "alpha_min_for_pair", 1e-3)  # skip tiny steps
 
-    if not armijo_ok or alpha < alpha_min:
-        return False
-
-    s = np.asarray(s)
-    yb = np.asarray(y_bar)
-    s_norm = float(np.linalg.norm(s))
-    yb_norm = float(np.linalg.norm(yb))
-    if s_norm < s_floor or yb_norm < y_floor:
-        return False
-
-    sTyb = float(np.dot(s, yb))
-    cos_sy = sTyb / (s_norm * yb_norm + 1e-16)
-    if sTyb <= 0.0 or cos_sy < cos_tol:
-        return False
-
-    # B0 proxy: B0 = (1/gamma) I  => s^T B0 s = ||s||^2 / gamma
-    sBs_B0 = (s_norm * s_norm) / max(gamma, 1e-16)
-    if sTyb < c_B * sBs_B0:
-        return False
-
-    # angle-safe ratio window
-    rho = sTyb / (s_norm * yb_norm + 1e-16)
-    if not (rho_min <= rho <= rho_max):
-        return False
-
-    return True
 
 
 # ==========================
@@ -531,7 +490,7 @@ class LBFGSRunner:
         f0 = self.loss()
         g = self.true_grad()
         gamma = 1.0
-        print(f"Iter 0: loss={f0:.6f}")
+        print(f"Iter 0: loss={np.sqrt(f0):.6f}")
         history.append(dict(iter=0, t=0.0, loss=f0))
         d_prev = None
 
@@ -583,9 +542,9 @@ class LBFGSRunner:
                        ybar_norm=float(np.linalg.norm(y_bar)), mem=len(self.mem.S), gamma=gamma,
                        ls_trace=ls_trace)
             history.append(rec)
-            if it % 10 == 0:
+            if it % 1 == 0:
                 print(
-                    f"Iter {it}: t={t_now:7.3f}s, , angle={angle_pi:.4f}, loss={sqrt_f:.5f}, d.g>0:{m0 > 0}, armijo:{accepted}, alpha={alpha:.3e}, iter={total_ls_iter}, |g|={rec['g_norm']:.3e}, neg_sTy={sTy < 0}, powel={theta_mix != 1.0}, pair ok:{pair_accepted}, mem={len(self.mem.S)}")
+                    f"Iter {it}: t={t_now:7.3f}s, , angle={angle_pi:.5f}, loss={sqrt_f:.6f}, d.g>0:{m0 > 0}, armijo:{accepted}, alpha={alpha:.4e}, iter={total_ls_iter}, |g|={rec['g_norm']:.4e}, neg_sTy={sTy < 0}, powel={theta_mix != 1.0}, pair ok:{pair_accepted}, mem={len(self.mem.S)}")
 
             #if np.linalg.norm(g) < 1e-6:
             #    break
@@ -706,6 +665,7 @@ if __name__ == "__main__":
     A_PARAM = 0.0
     B_PARAM = 1.0
     SHOW_PLOTS = True
+    ITER=200
 
     X, Y = make_dataset(N, seed=1, a=A_PARAM, b=B_PARAM)
 
@@ -715,12 +675,12 @@ if __name__ == "__main__":
     # Ensure identical initialization
     model_b.set_weights([w.copy() for w in model_a.get_weights()])
 
-    cfg_a = LBFGSConfig(max_iters=2000, mem=20, c1=1e-4, powell_c=0.2, ls_max_steps=10,
+    cfg_a = LBFGSConfig(max_iters=ITER, mem=20, c1=1e-4, powell_c=0.2, ls_max_steps=10,
                         alpha_init=1.0, cub_clip=(0.1, 2.5), quad_clip=(0.1, 2.5),
                         sigma_es=1e-3, sigma_decay=0.4, sigma_min=1e-8,
                         curvature_cos_tol=1e-1, diag_true_grad=False, adam_diagonal=False)
 
-    cfg_b = LBFGSConfig(max_iters=2000, mem=20, c1=1e-4, powell_c=0.2, ls_max_steps=10,
+    cfg_b = LBFGSConfig(max_iters=ITER, mem=20, c1=1e-4, powell_c=0.2, ls_max_steps=10,
                         alpha_init=1.0, cub_clip=(0.1, 2.5), quad_clip=(0.1, 2.5),
                         sigma_es=1e-3, sigma_decay=0.4, sigma_min=1e-8,
                         curvature_cos_tol=1e-1, diag_true_grad=False, adam_diagonal=True)
