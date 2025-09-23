@@ -62,6 +62,11 @@ def make_assign_fn(var_list):
 
 
 # ======================== Debug helper =======================================
+@tf_compile
+def add_flag(mask, cond, bit):
+    add = tf.where(cond, tf.zeros_like(mask),
+                   tf.bitwise.left_shift(tf.ones_like(mask), bit))
+    return mask | add
 
 @tf_compile
 def _probe_pre_ls_flagged(flag, f_m, g_m, d_o):
@@ -76,9 +81,13 @@ def _probe_pre_ls_flagged(flag, f_m, g_m, d_o):
         gTd_ok = tf.reduce_all(tf.math.is_finite(gTd))
 
         mask |= tf.where(f_ok, 0, one)
-        mask |= tf.where(g_ok, 0, one << 1)
-        mask |= tf.where(d_ok, 0, one << 2)
-        mask |= tf.where(gTd_ok, 0, one << 3)
+        mask = add_flag(mask, g_ok, 1)
+        mask = add_flag(mask, g_ok, 2)
+        mask = add_flag(mask, gTd_ok, 3)
+        #mask |= tf.where(g_ok, 0, one << 1)
+        #mask |= tf.where(d_ok, 0, one << 2)
+        #mask |= tf.where(gTd_ok, 0, one << 3)
+
         return mask, tf.cast(gTd, d_o.dtype)
 
     def no_run():
@@ -95,7 +104,8 @@ def _probe_post_ls_flagged(flag, f_new_m, g_new_m, dtype_o):
         f_ok = tf.reduce_all(tf.math.is_finite(f_new_m))
         g_ok = tf.reduce_all(tf.math.is_finite(g_new_m))
         mask |= tf.where(f_ok, 0, one)
-        mask |= tf.where(g_ok, 0, one << 1)
+        mask = add_flag(mask, g_ok, 1)
+        #mask |= tf.where(g_ok, 0, one << 1)
         return mask
 
     def no_run():
@@ -114,9 +124,12 @@ def _probe_curvature_flagged(flag, s_m, y_m, sTy_o, q_new_o):
         sTy_ok = tf.reduce_all(tf.math.is_finite(sTy_o))
         q_ok = tf.reduce_all(tf.math.is_finite(q_new_o))
         mask |= tf.where(s_ok, 0, one)
-        mask |= tf.where(y_ok, 0, one << 1)
-        mask |= tf.where(sTy_ok, 0, one << 2)
-        mask |= tf.where(q_ok, 0, one << 3)
+        mask = add_flag(mask, s_ok, 1)
+        mask = add_flag(mask, sTy_ok, 2)
+        mask = add_flag(mask, q_ok, 3)
+        #mask |= tf.where(y_ok, 0, one << 1)
+        #mask |= tf.where(sTy_ok, 0, one << 2)
+        #mask |= tf.where(q_ok, 0, one << 3)
         return mask
 
     def no_run():
@@ -149,13 +162,13 @@ def _two_loop_opt(S_m, Y_m, mem_size, m_cap, gamma_o, g_m, eps_rho_o):
     g_o = tf.cast(g_m, gamma_o.dtype)
     S = tf.cast(S_m[:mem_size], g_o.dtype)
     Y = tf.cast(Y_m[:mem_size], g_o.dtype)
-
+    mem_size_t = tf.cast(tf.convert_to_tensor(mem_size), tf.int32)
     def _empty():
         return -g_o, tf.constant(False)
 
     def _nonempty():
-        alpha_TA = tf.TensorArray(g_o.dtype, size=mem_size, clear_after_read=False)
-        rho_TA = tf.TensorArray(g_o.dtype, size=mem_size, clear_after_read=False)
+        alpha_TA = tf.TensorArray(g_o.dtype, size=mem_size_t, clear_after_read=False)
+        rho_TA = tf.TensorArray(g_o.dtype, size=mem_size_t, clear_after_read=False)
         used_cap = tf.constant(False)
 
         def bwd_cond(i, _q, _aTA, _rTA, _used):
@@ -614,8 +627,8 @@ class LBFGS_GRAPH:
                     self.window, self.armijo_use_cubic,
                     self.bt, self.tol_alpha,            # tolx
                     self.armijo_max_norm_d,
-                    self.armijo_use_wolfe, self.c2,
-                    self.eps_div                         # dtype-aware epsilon for alamin guard
+                    self.armijo_use_wolfe, self.c2
+                    #self.eps_div                         # dtype-aware epsilon for alamin guard
                 )
                 evals_or_backs = backs
             else:

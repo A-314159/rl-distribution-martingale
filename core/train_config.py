@@ -107,6 +107,20 @@ class TrainConfig:
 
     def get_config(self) -> dict:
         """Return configuration as a plain dictionary (safe for JSON)."""
+        import tensorflow as tf
+
+        cfg = {}
+        for k, v in self.__dict__.items():
+            if isinstance(v, tf.dtypes.DType):
+                cfg[k] = v.name  # "float32", "float64", etc.
+            elif isinstance(v, tuple):
+                cfg[k] = list(v)  # JSON prefers lists
+            else:
+                cfg[k] = v
+        return cfg
+
+    def get_config_old(self) -> dict:
+        """Return configuration as a plain dictionary (safe for JSON)."""
         return self.__dict__
         """
         return {

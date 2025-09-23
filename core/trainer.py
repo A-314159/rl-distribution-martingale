@@ -47,9 +47,14 @@ class DistributionTrainer:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         with open(out_dir / "hyperparams.json", "w") as f:
-            json.dump({"universe": jsonable(self.universe), "actor": jsonable(self.actor),
-                       "sampler": asdict(self.sampler_cfg), "train": jsonable(self.train_cfg)}, f, indent=2)
-
+            #json.dump({"universe": jsonable(self.universe), "actor": jsonable(self.actor),
+            #           "sampler": asdict(self.sampler_cfg), "train": jsonable(self.train_cfg)}, f, indent=2)
+            json.dump({
+                "universe": self.universe.get_config(),
+                "actor": self.actor.get_config(),
+                "sampler": asdict(self.sampler_cfg),
+                "train": self.train_cfg.get_config()
+            }, f, indent=2)
         return self.model
 
     def make_errors_function(self, data, detailed=False):
