@@ -582,5 +582,4 @@ def _demo2():
     plot_3d_pred_and_error(model, a=a, b=b, Nx=400, Nt=400, soft=True)
     plot_gate_vs_curve(model, a=a, b=b)
 
-if __name__ == "__main__":
-    _demo2()
+_demo2()

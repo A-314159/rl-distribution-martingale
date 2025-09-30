@@ -79,6 +79,7 @@ def update_H0_from_grad(g, v, beta2, eps, target_med):
     d0 = np.clip(d0, 1e-8, 1e+2)
     return v, d0
 
+
 # ==========================
 # Target & data
 # ==========================
@@ -171,7 +172,7 @@ class LBFGSMemory:
         if d0 is None:
             q *= gamma
         else:
-            q*=d0
+            q *= d0
         for (s, y, r, a) in zip(S, Y, reversed(rho), reversed(alpha)):
             b = r * np.dot(y, q)
             q += s * (a - b)
@@ -182,7 +183,8 @@ class LBFGSMemory:
 # Powell damping
 # ==========================
 
-def powell_damp_pair(s: np.ndarray, y: np.ndarray, c: float, gamma: float) -> Tuple[np.ndarray, float, float, float, bool]:
+def powell_damp_pair(s: np.ndarray, y: np.ndarray, c: float, gamma: float) -> Tuple[
+    np.ndarray, float, float, float, bool]:
     """Return y_bar and theta (mixing factor)."""
     ss, yy = np.dot(s, s), np.dot(y, y)
     sBs = (1.0 / max(gamma, 1e-16)) * ss
@@ -365,9 +367,6 @@ def should_accept_pair(s: np.ndarray,
     return False  #, sTyb, curv_floor, cos_sy
 
 
-
-
-
 # ==========================
 # Config & Runner
 # ==========================
@@ -430,12 +429,12 @@ class LBFGSRunner:
             if d0 is None:
                 return -gamma * g
             else:
-                return -d0*g
+                return -d0 * g
         return -self.mem.two_loop(g, gamma, d0)
 
     # ----- Line search (shared) -----
     def line_search(self, theta: np.ndarray, f0: float, g: np.ndarray, d: np.ndarray,
-                    mode: str, m0: Optional[float] = None) -> Tuple[float, bool, List[Tuple[float, float, bool]],int]:
+                    mode: str, m0: Optional[float] = None) -> Tuple[float, bool, List[Tuple[float, float, bool]], int]:
         cfg = self.cfg
         if m0 is None:
             m0 = float(np.dot(g, d))
@@ -448,9 +447,9 @@ class LBFGSRunner:
         best_f, best_a = f0, 0
         trace = []
         accepted = False
-        count=0
+        count = 0
         for i in range(cfg.ls_max_steps):
-            count+=1
+            count += 1
             theta_trial = theta + alpha * d
             self.set_x_tf32(tf.convert_to_tensor(theta_trial))
             f_a = self.loss()
@@ -495,12 +494,12 @@ class LBFGSRunner:
         d_prev = None
 
         # state
-        v = np.zeros_like(theta) # EMA of g^2
-        d0= None
+        v = np.zeros_like(theta)  # EMA of g^2
+        d0 = None
         beta2, eps = 0.999, 1e-8
 
         if cfg.adam_diagonal:        v, d0 = update_H0_from_grad(g, v, beta2, eps, gamma)
-        total_ls_iter=0
+        total_ls_iter = 0
         for it in range(1, cfg.max_iters + 1):
             d = self.direction(g, gamma, d0)
             angle_pi = float('nan')
@@ -513,7 +512,7 @@ class LBFGSRunner:
             d_prev = d.copy()
             m0 = float(np.dot(g, d))
             alpha, accepted, ls_trace, ls_iter = self.line_search(theta, f0, g, d, mode='autodiff', m0=m0)
-            total_ls_iter+=ls_iter
+            total_ls_iter += ls_iter
             theta_next = theta + alpha * d
             self.set_x_tf32(tf.convert_to_tensor(theta_next))
             f_next = self.loss()
@@ -534,7 +533,7 @@ class LBFGSRunner:
 
             theta, f0, g = theta_next, f_next, g_next
             t_now = time.perf_counter() - t0
-            sqrt_f=math.sqrt(f_next)
+            sqrt_f = math.sqrt(f_next)
 
             rec = dict(iter=it, t=t_now, loss=sqrt_f, alpha=alpha, armijo=accepted,
                        g_norm=float(np.linalg.norm(g)), d_dot_g=float(np.dot(d, g)),
@@ -653,8 +652,7 @@ class LBFGSRunner:
 # ==========================
 # Main
 # ==========================
-if __name__ == "__main__":
-
+def demo():
     seed = 1
     random.seed(seed)
     np.random.seed(seed)
@@ -665,12 +663,21 @@ if __name__ == "__main__":
     A_PARAM = 0.0
     B_PARAM = 1.0
     SHOW_PLOTS = True
-    ITER=200
+    ITER = 200
 
-    X, Y = make_dataset(N, seed=1, a=A_PARAM, b=B_PARAM)
+    X, Y = make_dataset(N, seed=seed, a=A_PARAM, b=B_PARAM)
 
     model_a = build_mlp()
     model_b = build_mlp()
+
+    # First 2 rows of data
+    print("X[:2] =", X[:2].numpy())
+    print("Y[:2] =", Y[:2].numpy())
+
+    # A tiny weight fingerprint (sum and first 5 scalars)
+    w0 = tf.concat([tf.reshape(v, [-1]) for v in model_a.weights], axis=0)
+    print("w-sum =", float(tf.reduce_sum(w0)))
+    print("w[:5] =", w0[:5].numpy())
 
     # Ensure identical initialization
     model_b.set_weights([w.copy() for w in model_a.get_weights()])
@@ -684,7 +691,6 @@ if __name__ == "__main__":
                         alpha_init=1.0, cub_clip=(0.1, 2.5), quad_clip=(0.1, 2.5),
                         sigma_es=1e-3, sigma_decay=0.4, sigma_min=1e-8,
                         curvature_cos_tol=1e-1, diag_true_grad=False, adam_diagonal=True)
-
 
     skip_auto_diff = False
     if not skip_auto_diff:
@@ -710,3 +716,7 @@ if __name__ == "__main__":
         plot_convergence(hist_a, hist_b, skip_auto_diff)
         plot_slices(model_a, model_b, a=A_PARAM, b=B_PARAM, skip_a=skip_auto_diff)
         plt.show()
+
+
+run = True
+if run: demo()

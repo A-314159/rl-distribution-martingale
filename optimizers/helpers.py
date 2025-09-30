@@ -12,3 +12,6 @@ def _dot(a, b):
 @tf_compile
 def _norm(a):
     return tf.sqrt(tf.maximum(0.0, _dot(a, a)))
+
+
+

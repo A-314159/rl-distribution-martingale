@@ -695,8 +695,7 @@ class OmegaPerSampleDisplay(tf.keras.Model):
 # ==========================
 # Main
 # ==========================
-if __name__ == "__main__":
-
+def demo():
     seed = 1
     random.seed(seed);
     np.random.seed(seed);
@@ -820,3 +819,5 @@ if __name__ == "__main__":
         ref_A = model_b if skip_A else model_a
         plot_slices(ref_A, pred_O2, a=A_PARAM, b=B_PARAM, skip_a=False)
         plt.show()
+
+demo()

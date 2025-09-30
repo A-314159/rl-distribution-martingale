@@ -440,5 +440,4 @@ def _demo():
     plot_3d_pred_and_error(model, a=a, b=b, Nx=80, Nt=80, soft=True)
     plot_gate_vs_zt0(model, a=a, b=b)
 
-if __name__ == "__main__":
-    _demo()
+_demo()

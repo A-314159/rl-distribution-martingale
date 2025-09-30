@@ -907,7 +907,9 @@ def plot_convergence_omega(hist, title='Ω convergence'):
 # =========================================================
 # Main
 # =========================================================
-if __name__ == "__main__":
+run=True
+
+if run:
     set_seed(1)
 
     # --- data knobs
